@@ -176,4 +176,7 @@ pyrightconfig.json
 # Initializatino files
 .ini
 
+# Chrome profile data
+chrome_profile/
+
 # End of https://www.toptal.com/developers/gitignore/api/python

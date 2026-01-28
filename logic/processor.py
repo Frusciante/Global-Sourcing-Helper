@@ -99,16 +99,35 @@ class SourcingProcessor:
             self.log_callback(f"❌ 엑셀 기록 에러: {e}")
 
     def init_driver(self):
+        """프로젝트 전용 독립 프로필을 사용하여 충돌 방지"""
         chrome_options = Options()
-        user_data_dir = os.path.join(os.environ['LOCALAPPDATA'], 'Google', 'Chrome', 'User Data')
-        chrome_options.add_argument(f"--user-data-dir={user_data_dir}")
-        chrome_options.add_argument("--profile-directory=Default")
+        
+        # [핵심 변경] 시스템 크롬 설정 대신, 현재 폴더에 'chrome_profile'이라는 새 폴더를 만들어 사용
+        # 이렇게 하면 기존에 열려있는 크롬과 충돌할 일이 전혀 없습니다.
+        curr_folder = os.getcwd()
+        profile_path = os.path.join(curr_folder, "chrome_profile")
+        chrome_options.add_argument(f"--user-data-dir={profile_path}")
+        
+        # 포트 강제 지정 옵션 삭제 (Selenium이 알아서 빈 포트를 찾게 둠)
+        # chrome_options.add_argument("--remote-debugging-port=9222") 
+        
+        # 안정성 옵션
+        chrome_options.add_argument("--no-sandbox")
+        chrome_options.add_argument("--disable-dev-shm-usage")
+        chrome_options.add_argument("--disable-gpu")
+        
+        # 봇 탐지 우회 설정
         chrome_options.add_argument("--disable-blink-features=AutomationControlled")
         chrome_options.add_experimental_option("excludeSwitches", ["enable-automation"])
-        
-        service = Service(ChromeDriverManager().install())
-        driver = webdriver.Chrome(service=service, options=chrome_options)
-        return driver
+        chrome_options.add_experimental_option('useAutomationExtension', False)
+
+        try:
+            service = Service(ChromeDriverManager().install())
+            driver = webdriver.Chrome(service=service, options=chrome_options)
+            return driver
+        except Exception as e:
+            self.log_callback(f"❌ 브라우저 실행 실패: {e}")
+            raise e
 
     def detect_and_translate(self, html_source, keyword):
         try:

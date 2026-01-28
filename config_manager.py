@@ -24,7 +24,8 @@ class ConfigManager:
             'KIPRIS_API_KEY': kipris.strip(),
             'SHOP_URLS': clean_urls,
             'TARGET_ITEMS': clean_items,
-            'ITEM_COUNT': str(count)
+            'ITEM_COUNT': str(count),
+            'EXCEL_FILE': excel_file.strip()
         }
         with open(self.filename, 'w', encoding='utf-8') as f:
             self.config.write(f)
