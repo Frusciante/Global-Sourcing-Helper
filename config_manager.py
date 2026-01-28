@@ -11,11 +11,11 @@ class ConfigManager:
             self.config.read(self.filename, encoding='utf-8')
 
     def create_default_config(self):
-        self.config['SETTINGS'] = {'GEMINI_API_KEY': '', 'KIPRIS_API_KEY': '', 'SHOP_URLS': '', 'TARGET_ITEMS': '', 'ITEM_COUNT': '10'}
+        self.config['SETTINGS'] = {'GEMINI_API_KEY': '', 'KIPRIS_API_KEY': '', 'SHOP_URLS': '', 'TARGET_ITEMS': '', 'ITEM_COUNT': '10', 'EXCEL_FILE': 'windly-excel-bulk-upload-ver9.xlsx'}
         with open(self.filename, 'w', encoding='utf-8') as f:
             self.config.write(f)
 
-    def save(self, gemini, kipris, urls, items, count):
+    def save(self, gemini, kipris, urls, items, count, excel_file):
         # 공백 제거 로직 포함
         clean_urls = ",".join([url.strip() for url in urls.split(",") if url.strip()])
         clean_items = ",".join([item.strip() for item in items.split(",") if item.strip()])

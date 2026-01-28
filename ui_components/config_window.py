@@ -62,6 +62,12 @@ class ConfigWindow(ctk.CTk):
         self.entry_count.pack(pady=(5, 25), anchor="w", padx=85)
         existing_count = self.cm.get_val("ITEM_COUNT")
         self.entry_count.insert(0, existing_count if existing_count else "10")
+        
+        # --- 6. 대상 엑셀 파일명 ---
+        self._create_label("대상 엑셀 파일명 (확장자 포함)")
+        self.entry_excel = ctk.CTkEntry(self.scrollable_frame, width=580, height=45, font=self.entry_font)
+        self.entry_excel.pack(pady=(5, 15), anchor="w", padx=85)
+        self.entry_excel.insert(0, self.cm.get_val("EXCEL_FILE"))
 
         # 저장 버튼 (버튼은 안정감을 위해 중앙 정렬 유지)
         self.btn_save = ctk.CTkButton(
@@ -85,6 +91,8 @@ class ConfigWindow(ctk.CTk):
         urls = self.txt_urls.get("1.0", "end-1c").strip()
         items = self.txt_items.get("1.0", "end-1c").strip()
         count = self.entry_count.get().strip()
+        excel_file = self.entry_excel.get().strip()
+        self.cm.save(gemini, kipris, urls, items, count, excel_file)
 
         if not count.isdigit():
             messagebox.showwarning("입력 오류", "수집 개수는 숫자만 입력 가능합니다.")
@@ -94,7 +102,7 @@ class ConfigWindow(ctk.CTk):
             messagebox.showwarning("입력 누락", "API 키 정보를 모두 입력해 주세요.")
             return
 
-        self.cm.save(gemini, kipris, urls, items, count)
+        self.cm.save(gemini, kipris, urls, items, count, excel_file)
         
         self.success = True
         messagebox.showinfo("저장 완료", "설정이 저장되었습니다.")
