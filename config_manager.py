@@ -11,11 +11,11 @@ class ConfigManager:
             self.config.read(self.filename, encoding='utf-8')
 
     def create_default_config(self):
-        self.config['SETTINGS'] = {'GEMINI_API_KEY': '', 'KIPRIS_API_KEY': '', 'SHOP_URLS': '', 'TARGET_ITEMS': ''}
+        self.config['SETTINGS'] = {'GEMINI_API_KEY': '', 'KIPRIS_API_KEY': '', 'SHOP_URLS': '', 'TARGET_ITEMS': '', 'ITEM_COUNT': '10'}
         with open(self.filename, 'w', encoding='utf-8') as f:
             self.config.write(f)
 
-    def save(self, gemini, kipris, urls, items):
+    def save(self, gemini, kipris, urls, items, count):
         # 공백 제거 로직 포함
         clean_urls = ",".join([url.strip() for url in urls.split(",") if url.strip()])
         clean_items = ",".join([item.strip() for item in items.split(",") if item.strip()])
@@ -23,7 +23,8 @@ class ConfigManager:
             'GEMINI_API_KEY': gemini.strip(),
             'KIPRIS_API_KEY': kipris.strip(),
             'SHOP_URLS': clean_urls,
-            'TARGET_ITEMS': clean_items
+            'TARGET_ITEMS': clean_items,
+            'ITEM_COUNT': str(count)
         }
         with open(self.filename, 'w', encoding='utf-8') as f:
             self.config.write(f)

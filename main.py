@@ -1,18 +1,26 @@
-from ui_components import ConfigWindow, MainProcessWindow
+# main.py 수정 부분
+import threading
+from ui_components.config_window import ConfigWindow
+from ui_components.main_process_window import MainProcessWindow
+from logic.processor import SourcingProcessor
 
-def run_program():
-    # 1. 설정 창 실행
+def main():
     settings_app = ConfigWindow()
     settings_app.mainloop()
 
-    # 2. 설정창이 정상적으로 저장(destroy)된 후 다음 단계 진행
     if settings_app.success:
+        # 1. 설정값 가져오기
+        config_data = settings_app.cm.config['SETTINGS']
+        
+        # 2. 메인 창 생성
         process_app = MainProcessWindow()
         
-        # 여기서 실제 로직(크롤링/AI)을 별도 스레드로 실행하면 좋습니다.
-        process_app.add_log("설정 로드 완료. 작업을 시작합니다...")
+        # 3. 로직 엔진 생성 및 스레드 시작
+        processor = SourcingProcessor(config_data, process_app.add_log)
+        thread = threading.Thread(target=processor.run, daemon=True)
+        thread.start()
         
         process_app.mainloop()
-
+        
 if __name__ == "__main__":
-    run_program()
+    main()
