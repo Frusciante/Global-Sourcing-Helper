@@ -148,17 +148,29 @@ class SourcingProcessor:
         except Exception as e:
             self.log_callback(f"❌ 엑셀 기록 에러: {e}")
 
+
     def init_driver(self):
+        """[수정됨] 사용자의 실제 크롬 'Default' 프로필 연동"""
         chrome_options = Options()
-        curr_folder = os.getcwd()
-        profile_path = os.path.join(curr_folder, "chrome_profile")
-        chrome_options.add_argument(f"--user-data-dir={profile_path}")
         
+        # 1. 윈도우 실제 크롬 데이터 경로 지정
+        # (C:\Users\사용자명\AppData\Local\Google\Chrome\User Data)
+        user_data_dir = os.path.join(os.environ['LOCALAPPDATA'], 'Google', 'Chrome', 'User Data')
+        chrome_options.add_argument(f"--user-data-dir={user_data_dir}")
+
+        # 2. 첫 번째 프로필(Default) 지정
+        # (만약 '프로필 1'을 쓰신다면 "Profile 1"로 변경하시면 됩니다)
+        chrome_options.add_argument("--profile-directory=Default")
+        
+        # 3. 봇 탐지 우회 및 안정성 옵션
         chrome_options.add_argument("--no-sandbox")
         chrome_options.add_argument("--disable-dev-shm-usage")
         chrome_options.add_argument("--disable-gpu")
+        chrome_options.add_argument("--remote-allow-origins=*") # 중요: 포트 충돌 방지
+        
+        # 자동화 멘트 제거 및 감지 우회
         chrome_options.add_argument("--disable-blink-features=AutomationControlled")
-        chrome_options.add_experimental_option("excludeSwitches", ["enable-automation"])
+        chrome_options.add_experimental_option("excludeSwitches", ["enable-automation", "enable-logging"])
         chrome_options.add_experimental_option('useAutomationExtension', False)
 
         try:
@@ -166,7 +178,12 @@ class SourcingProcessor:
             driver = webdriver.Chrome(service=service, options=chrome_options)
             return driver
         except Exception as e:
-            self.log_callback(f"❌ 브라우저 실행 실패: {e}")
+            # 크롬이 켜져 있을 때 자주 발생하는 에러 처리
+            if "user data directory is already in use" in str(e):
+                self.log_callback("❌ 오류: 크롬이 이미 실행 중입니다!")
+                self.log_callback("👉 열려 있는 모든 크롬 창을 닫고 다시 실행해 주세요.")
+            else:
+                self.log_callback(f"❌ 브라우저 실행 실패: {e}")
             raise e
 
     def detect_and_translate(self, url, html_source, keyword):
