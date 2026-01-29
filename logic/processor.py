@@ -131,7 +131,7 @@ class SourcingProcessor:
             if not match.empty: return match.iloc[0][target_col]
         return ""
 
-    # [신규 기능] 키워드 자체로 카테고리 결정 (일관성 유지)
+    # [수정된 함수] 카테고리를 확정할 때까지 절대 넘어가지 않음
     def determine_master_category(self, keyword):
         self.log_callback(f"🧠 [Category] '{keyword}'의 대표 카테고리 분석 중...")
         prompt = (
@@ -140,13 +140,30 @@ class SourcingProcessor:
             f"예시: 가구/인테리어 > 인테리어 조명 > 단스탠드\n"
             f"설명 없이 경로만 출력해."
         )
-        cat_hint = self._call_gemini_with_retry(prompt, "카테고리 결정")
-        
-        if cat_hint:
-            cp = self.find_best_category(cat_hint, 'coupang')
-            nv = self.find_best_category(cat_hint, 'naver')
-            self.log_callback(f"   ㄴ 결정됨: [쿠팡] {cp} / [네이버] {nv}")
-            return cp, nv
+
+        # 성공할 때까지 무한 반복 (While Loop)
+        while self.is_running:
+            cat_hint = self._call_gemini_with_retry(prompt, "카테고리 결정")
+            
+            if cat_hint:
+                # 성공 시 바로 처리 후 반환
+                cp = self.find_best_category(cat_hint, 'coupang')
+                nv = self.find_best_category(cat_hint, 'naver')
+                self.log_callback(f"   ㄴ 결정됨: [쿠팡] {cp} / [네이버] {nv}")
+                return cp, nv
+            
+            # 실패 시 (None 반환됨): 절대 넘어가지 않고 대기
+            self.log_callback(f"⛔ [Critical] 카테고리 분석 실패 (AI 한도 초과). 30초 대기 후 재시도합니다...")
+            self.log_callback(f"   (이 단계는 필수이므로 건너뛰지 않습니다)")
+            
+            # 30초 동안 대기 (사용자가 중지 버튼 누르면 바로 탈출하도록 1초씩 30번 쉼)
+            for _ in range(30):
+                if not self.is_running: return "", ""
+                time.sleep(1)
+            
+            # 루프의 처음으로 돌아가서 다시 AI 호출 시도
+            self.log_callback("🔄 카테고리 분석 재시도...")
+
         return "", ""
 
     def append_to_excel(self, data_row):
@@ -252,47 +269,93 @@ class SourcingProcessor:
         while self.is_running:
             try:
                 self.log_callback(f"🔍 [Search] '{keyword}' 검색 시작...")
+                
+                # [수정 1] 무조건 메인 페이지로 이동해서 초기화 (가장 안전)
                 driver.get(url)
                 time.sleep(3)
 
-                # 1. 검색창 찾기
+                # 1. 검색창 찾기 (Wait 시간 늘림)
                 search_input = None
                 search_selectors = [
-                    "input#twotabsearchtextbox", "input#q", "input[name='q']", 
-                    "input[type='search']", "input[name='keyword']", "input#mq", "input[id*='search']"
+                    "input#twotabsearchtextbox", # 아마존
+                    "input#q", 
+                    "input[name='q']", 
+                    "input[type='search']",
+                    "input[name='keyword']",
+                    "input[id*='search']"
                 ]
 
                 for sel in search_selectors:
                     try:
-                        search_input = WebDriverWait(driver, 3).until(
-                            EC.presence_of_element_located((By.CSS_SELECTOR, sel))
+                        search_input = WebDriverWait(driver, 5).until(
+                            EC.element_to_be_clickable((By.CSS_SELECTOR, sel))
                         )
-                        if search_input: break
+                        if search_input:
+                            self.log_callback(f"   ㄴ 검색창 발견: {sel}")
+                            break
                     except: continue
 
-                # 2. 검색 수행
-                if search_input:
-                    try:
-                        search_input.clear()
-                        search_input.send_keys(keyword)
-                        time.sleep(1)
-                        search_input.send_keys(Keys.ENTER)
-                        self.log_callback("   ㄴ 검색어 입력 및 엔터 완료")
+                if not search_input:
+                    raise Exception("검색창을 찾을 수 없습니다.")
+
+                # 2. 검색어 입력 및 실행 (3중 안전장치)
+                try:
+                    search_input.click() # 포커스 주기
+                    time.sleep(0.5)
+                    
+                    # 기존 내용 지우기 (clear가 안 먹힐 때를 대비해 Ctrl+A -> Del)
+                    search_input.clear()
+                    search_input.send_keys(Keys.CONTROL + "a")
+                    search_input.send_keys(Keys.DELETE)
+                    
+                    # 입력
+                    search_input.send_keys(keyword)
+                    time.sleep(1)
+                    
+                    # [방법 A] 엔터키 전송
+                    search_input.send_keys(Keys.ENTER)
+                    self.log_callback("   ㄴ 1차 시도: 엔터 입력")
+                    
+                    # URL 변화 감지 (검색 성공 여부 확인)
+                    time.sleep(3)
+                    current_url = driver.current_url
+                    
+                    # [방법 B] 엔터로 URL이 안 바뀌었다면 -> 검색 버튼 클릭
+                    if current_url == url or "search" not in current_url:
+                        self.log_callback("   ⚠️ 엔터 반응 없음. 검색 버튼 클릭 시도...")
                         
-                        time.sleep(2)
-                        if driver.current_url == url: # 페이지 안 바뀌면 클릭 시도
-                            btn_selectors = ["input[type='submit']", "button[class*='search']", "span[class*='search-icon']", "#nav-search-submit-button"]
-                            for btn_sel in btn_selectors:
-                                try:
-                                    driver.find_element(By.CSS_SELECTOR, btn_sel).click()
-                                    break
-                                except: pass
-                        time.sleep(5)
-                    except Exception as e:
-                        self.log_callback(f"❌ [Search] 입력 오류: {e}")
-                        raise e
-                else:
-                    raise Exception("검색창 미발견")
+                        btn_selectors = [
+                            "input[type='submit']", 
+                            "button[class*='search']", 
+                            "span[class*='search-icon']", 
+                            "#nav-search-submit-button", # 아마존 전용
+                            "button[type='submit']",
+                            "[aria-label='Go']"
+                        ]
+                        
+                        clicked = False
+                        for btn_sel in btn_selectors:
+                            try:
+                                btn = driver.find_element(By.CSS_SELECTOR, btn_sel)
+                                # [방법 C] 자바스크립트로 강제 클릭 (제일 강력함)
+                                driver.execute_script("arguments[0].click();", btn)
+                                clicked = True
+                                self.log_callback(f"   ㄴ 검색 버튼 강제 클릭 완료 ({btn_sel})")
+                                break
+                            except: pass
+                        
+                        if not clicked:
+                            # 최후의 수단: 폼 자체를 submit
+                            try:
+                                search_input.submit()
+                                self.log_callback("   ㄴ 폼(Form) 강제 제출")
+                            except: pass
+                            
+                    time.sleep(5) # 검색 결과 로딩 대기
+
+                except Exception as e:
+                    self.log_callback(f"❌ [Search] 입력/제출 중 오류: {e}")
+                    raise e
 
                 # 3. 상품 목록 수집
                 selectors = ["[class*='title--']", "[class*='Title--']", "div.title", "div.item-name", "a[id*='item-title']", "h1", "h2", "h3", "span.a-text-normal"]
@@ -308,7 +371,7 @@ class SourcingProcessor:
                         self.log_callback(f"   ㄴ 목록 발견: '{selector}' ({len(valid_elements)}개)")
                         for el in valid_elements:
                             product_name = el.text.strip()
-                            product_link = driver.current_url 
+                            product_link = driver.current_url # Fallback
                             
                             try:
                                 if el.tag_name == 'a': product_link = el.get_attribute('href')
@@ -324,34 +387,65 @@ class SourcingProcessor:
                         
                         if len(products) >= 3: break
                 
-                if not products: raise Exception("유효한 상품 없음")
+                if not products: 
+                    # 검색 결과가 0개면 그냥 빈 리스트 리턴하고 다음 키워드로 넘어가게 (프로그램 종료 방지)
+                    self.log_callback("⚠️ 검색 결과가 없거나 수집 실패. 다음 키워드로 넘어갑니다.")
+                    return []
+                    
                 return products[:count]
 
             except WebDriverException as we:
                 self.log_callback(f"🚨 [Browser] 연결 끊김 재시작: {we}")
                 raise we
             except Exception as e:
-                self.log_callback(f"⚠️ [Search] 검색 실패: {e}")
+                self.log_callback(f"⚠️ [Search] 검색 프로세스 실패: {e}")
                 return []
 
+
     def extract_full_info(self, p_name):
+        """상품 정보 추출 및 한국어 번역 강화"""
         prompt = (
-            f"Analyze: '{p_name}'\n"
-            "Is this a product? If navigational text, 'is_valid': false.\n"
+            f"Analyze this product name: '{p_name}'\n"
+            "Task: Extract information and Translate to Korean for e-commerce.\n\n"
             "Rules:\n"
-            "1. brand: if unknown output 'NULL'.\n"
-            "2. productTitle: Korean translation.\n"
-            "JSON Output: { 'is_valid': true, 'productTitle': '...', 'manufacturer': '...', 'brand': '...', 'model': '...', 'keywords': [], 'category_hint': '...' }"
+            "1. Validity Check: Is this a real product? If it's navigational text (e.g., 'Free Shipping', 'Category', 'Login'), set 'is_valid': false.\n"
+            "2. Brand: If unknown or generic, output strictly 'NULL'. Do not use 'N/A'.\n"
+            "3. Product Title (Crucial): \n"
+            "   - Translate the product name into **natural and attractive Korean** (한국어) suitable for online shopping titles.\n"
+            "   - Remove unnecessary English/Chinese characters, model numbers, or repetitive words.\n"
+            "   - Example: 'Portable Camping Chair Foldable' -> '휴대용 접이식 캠핑 의자'\n"
+            "4. Keywords: Extract 5 relevant keywords in Korean.\n"
+            "5. Category Hint: Category path in Korean.\n\n"
+            "Output JSON format:\n"
+            "{ 'is_valid': true, 'productTitle': '...', 'manufacturer': '...', 'brand': '...', 'model': '...', 'keywords': [], 'category_hint': '...' }"
         )
+
         res = self._call_gemini_with_retry(prompt, "정보추출")
         if res:
             try:
-                data = json.loads(res.replace('```json','').replace('```','').strip())
+                # 마크다운 제거
+                clean_json = res.replace('```json', '').replace('```', '').strip()
+                data = json.loads(clean_json)
+                
                 if not data.get('is_valid', True): 
                     self.log_callback(f"   🗑️ [Filter] 유효하지 않은 상품 제외: {p_name[:10]}...")
                     return None
+                
+                # 혹시 AI가 번역을 깜빡했을 경우를 대비한 2차 방어선 (한글이 하나도 없으면 재번역)
+                if not any('\u3131' <= char <= '\u3163' or '\uac00' <= char <= '\ud7a3' for char in data['productTitle']):
+                    self.log_callback("   ⚠️ [AI] 제목 번역 누락 감지 -> 강제 번역 시도")
+                    trans_prompt = f"Translate this product title into natural Korean: '{data['productTitle']}'"
+                    korean_title = self._call_gemini_with_retry(trans_prompt, "제목 강제번역")
+                    if korean_title:
+                        data['productTitle'] = korean_title
+
                 return data
-            except: return None
+            except json.JSONDecodeError: 
+                self.log_callback("   ⚠️ [AI] JSON 파싱 실패 (형식 오류)")
+                return None
+            except Exception as e:
+                self.log_callback(f"   ⚠️ [Extract] 데이터 처리 오류: {e}")
+                return None
         return None
 
     def check_trademark(self, brand):
