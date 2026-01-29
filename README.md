@@ -24,7 +24,7 @@
 2. **Chrome 브라우저** 설치 (Selenium 연동용)
 3. **API 키 발급**:
    - [Google AI Studio](https://aistudio.google.com/) : Gemini API Key 발급
-   - [지식재산정보 검색 서비스](https://kipris.or.kr/) : 특허청_상표 정보 조회 서비스(KIPRIS) 활용 신청 및 서비스키 발급
+   - [지식재산정보 검색 서비스](https://kipris.or.kr/) : 상표 정보 조회 서비스 활용 신청 및 서비스키 발급
 4. **엑셀 양식 파일**: `windly-excel-bulk-upload-ver9.xlsx` 파일이 프로젝트 루트 폴더에 있어야 합니다.
 
 ---
