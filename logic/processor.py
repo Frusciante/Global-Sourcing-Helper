@@ -16,6 +16,9 @@ class SourcingProcessor:
         self.log_callback = log_callback
         self.is_running = True
         
+        # KIPRIS 상표권 캐시 (속도 최적화, 중복 조회 방지, API 한도 절약)
+        self.brand_cache = {}
+        
         # 1. 엑셀 핸들러
         excel_file = self.config.get('EXCEL_FILE', 'windly-excel-bulk-upload-ver9.xlsx')
         self.excel = ExcelHandler(excel_file, log_callback)
@@ -160,12 +163,21 @@ class SourcingProcessor:
         return success
 
     def check_trademark(self, brand):
+        # 1. 브랜드명 전처리 (공백 제거 및 대문자화)
         if not brand or str(brand).upper() in ["NULL", "NONE", "N/A"]: return True
+        brand_key = str(brand).strip().upper()
+
+        # 2. [캐시 확인] 이미 조회한 적 있는 브랜드인가?
+        if brand_key in self.brand_cache:
+            is_safe = self.brand_cache[brand_key]
+            return is_safe
+
+        # 3. KIPRIS 조회 로직 (기존과 동일하되, 리턴 전에 저장만 추가)
         if not self.kipris_keys: return True 
 
         api_url = "https://plus.kipris.or.kr/kipo-api/kipi/trademarkInfoSearchService/getWordSearch"
+        max_retries = max(1, len(self.kipris_keys))
         
-        max_retries = 3
         for attempt in range(max_retries):
             current_key = self.kipris_keys[self.current_kipris_idx]
             params = {'searchString': brand, 'ServiceKey': current_key}
@@ -173,30 +185,39 @@ class SourcingProcessor:
             try:
                 res = requests.get(api_url, params=params, timeout=5)
                 if res.status_code != 200:
-                    self.log_callback(f"⚠️ [KIPRIS] 서버 오류({res.status_code}). 키 교체 시도...")
+                    self.log_callback(f"⚠️ [KIPRIS] 서버 오류({res.status_code}). 키 교체...")
                     if self._rotate_kipris_key(): continue
+                    
+                    # 에러 나면 일단 통과시키고 캐시엔 저장하지 않음 (일시적일 수 있으므로)
                     return True 
-
+                
                 root = ET.fromstring(res.content)
                 error_info = root.find(".//errMsg")
                 if error_info is not None and error_info.text:
-                    self.log_callback(f"⚠️ [KIPRIS] API 에러: {error_info.text}. 키 교체 시도...")
+                    self.log_callback(f"⚠️ [KIPRIS] API 에러. 키 교체...")
                     if self._rotate_kipris_key(): continue
                     return True
 
                 count_tag = root.find(".//totalCount")
                 if count_tag is None: return True
-                    
+                
                 count = int(count_tag.text)
+                
+                # 4. 결과 판별 및 캐시 저장
                 if count > 0:
                     self.log_callback(f"   ❌ [KIPRIS] 상표권 발견! '{brand}' ({count}건)")
+                    self.brand_cache[brand_key] = False # 위험(False) 저장
                     return False
-                return True 
+                
+                # 안전(True) 저장
+                self.brand_cache[brand_key] = True
+                return True
 
             except Exception as e:
-                self.log_callback(f"⚠️ [KIPRIS] 조회 실패({e}). 재시도...")
+                self.log_callback(f"⚠️ [KIPRIS] 조회 실패. 재시도...")
                 if self._rotate_kipris_key(): continue
-                return True 
+                return True
+        
         return True
 
     # ==========================
@@ -275,6 +296,11 @@ class SourcingProcessor:
             return keyword
         except: return keyword
 
+
+    def stop(self):
+        self.is_running = False
+        self.log_callback("🛑 [Stop] 중지 요청됨")
+
     def run(self):
         keywords = [k.strip() for k in self.config['TARGET_ITEMS'].split(",") if k.strip()]
         urls = [u.strip() for u in self.config['SHOP_URLS'].split(",") if u.strip()]
@@ -282,39 +308,57 @@ class SourcingProcessor:
         
         self.browser.start_driver()
         try:
-            for kw in keywords:
+            # [변경 1] 쇼핑몰(URL)을 가장 바깥쪽 루프로 이동
+            for shop_url in urls:
                 if not self.is_running: break
-                self.log_callback(f"\n=== 🏁 키워드 작업 시작: {kw} ===")
+                self.log_callback(f"\n\n🌐 [Shop] 쇼핑몰 이동 및 작업 시작: {shop_url}")
                 
-                for shop_url in urls:
+                # [변경 2] 해당 쇼핑몰에서 모든 키워드를 순차적으로 검색
+                for kw in keywords:
                     if not self.is_running: break
+                    
+                    # 브랜드 캐시는 키워드 단위(또는 쇼핑몰 단위)로 초기화
+                    self.brand_cache = {} 
+                    self.log_callback(f"\n   📍 [Keyword] 키워드 검색 시작: '{kw}' (브랜드 캐시 초기화)")
+
                     try:
+                        # 1. 언어 감지 및 번역 (현재 쇼핑몰에 맞춰서 번역)
                         t_kw = self.detect_and_translate(shop_url, kw)
                         if len(t_kw) > 50: t_kw = kw 
 
+                        # 2. 상품 수집
                         product_list = self.browser.search_and_collect(shop_url, t_kw, max_count, lambda: self.is_running)
-                        self.log_callback(f"📊 [Info] {len(product_list)}개 상품 상세 분석 시작...")
+                        self.log_callback(f"   📊 [Info] {len(product_list)}개 상품 상세 분석 시작...")
                         
+                        # 3. 상품 상세 분석
                         for i, (p_name, p_url) in enumerate(product_list):
                             if not self.is_running: break
-                            self.log_callback(f"🔎 [{i+1}/{len(product_list)}] 상세 페이지 이동 및 분석...")
+                            self.log_callback(f"   🔎 [{i+1}/{len(product_list)}] 상세 페이지 이동 및 분석...")
                             
-                            # [추가됨] 상세 페이지 내용 긁어오기
+                            # 상세 페이지 텍스트 추출
                             detail_text = self.browser.visit_and_get_text(p_url)
                             
-                            # [수정됨] detail_text를 함께 전달
+                            # 정보 추출
                             info = self.extract_full_info(p_name, detail_text)
+                            
+                            # 에러나 중단 시 탈출
+                            if info is None and not self.is_running: break
+
                             time.sleep(2) 
                             
                             if info:
+                                # 상표권 확인 (캐시 적용됨)
                                 if self.check_trademark(info['brand']):
+                                    # 카테고리 분석
                                     cat_hint = self.analyze_category_with_ai(info['productTitle'])
                                     time.sleep(1)
                                     
+                                    # 엑셀 매칭
                                     best_cp = self.excel.find_best_category(cat_hint, 'coupang')
                                     best_nv = self.excel.find_best_category(cat_hint, 'naver')
-                                    self.log_callback(f"   ㄴ 카테고리: {best_cp[:10]}... / {best_nv[:10]}...")
+                                    self.log_callback(f"      ㄴ 카테고리: {best_cp[:10]}... / {best_nv[:10]}...")
                                     
+                                    # 저장
                                     self.excel.save_product({
                                         'cp_cat': best_cp, 'nv_cat': best_nv,
                                         'title': info['productTitle'], 'tags': info['keywords'],
@@ -322,7 +366,6 @@ class SourcingProcessor:
                                         'brand': info['brand'], 'model': info['model']
                                     })
                             time.sleep(1)
-
                     except WebDriverException:
                         self.log_callback("🚨 브라우저 오류. 재시작...")
                         self.browser.close(); self.browser.start_driver()
@@ -332,6 +375,3 @@ class SourcingProcessor:
             self.browser.close()
             self.log_callback("\n🏁 [Finish] 작업 종료")
 
-    def stop(self):
-        self.is_running = False
-        self.log_callback("🛑 [Stop] 중지 요청됨")

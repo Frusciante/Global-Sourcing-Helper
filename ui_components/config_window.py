@@ -1,39 +1,45 @@
 import customtkinter as ctk
 import tkinter as tk
 from tkinter import messagebox
+import requests
+import datetime
 
 class StringListEditor(ctk.CTkFrame):
-    """모던한 격자(Grid) 스타일 리스트 에디터"""
+    """모던한 격자(Grid) 스타일 리스트 에디터 (전체 삭제 기능 추가됨)"""
     def __init__(self, master, title, initial_value="", height=200, **kwargs):
         super().__init__(master, **kwargs)
         self.grid_columnconfigure(0, weight=1)
         self.grid_rowconfigure(1, weight=1)
         self.items = []
+        self.title_text = title # 확인창 메시지용으로 제목 저장
 
-        # 제목 (맑은 고딕 적용)
-        self.label = ctk.CTkLabel(
-            self, text=title, 
-            font=("Malgun Gothic", 16, "bold"), 
-            anchor="w", text_color="#3B8ED0"
-        )
+        self.configure(fg_color="transparent") 
+
+        # 1. 제목 라벨
+        self.label = ctk.CTkLabel(self, text=title, font=("Malgun Gothic", 16, "bold"), anchor="w", text_color="#3B8ED0")
         self.label.grid(row=0, column=0, sticky="w", padx=5, pady=(5, 5))
 
-        # 스크롤 영역
-        self.scroll_frame = ctk.CTkScrollableFrame(
-            self, height=height, fg_color="#2B2B2B", scrollbar_button_color="#555555"
-        )
+        # 2. 스크롤 영역
+        self.scroll_frame = ctk.CTkScrollableFrame(self, height=height, fg_color="#1A1A1A", scrollbar_button_color="#555555")
         self.scroll_frame.grid(row=1, column=0, sticky="nsew", padx=5, pady=5)
         self.scroll_frame.grid_columnconfigure(0, weight=1)
 
-        # 추가 버튼
-        self.btn_add = ctk.CTkButton(
-            self, text="+ 항목 추가 (Add Item)", 
-            font=("Malgun Gothic", 14, "bold"),
-            height=35,
-            command=self.add_item_dialog, 
-            fg_color="#2CC985", hover_color="#229C68"
-        )
-        self.btn_add.grid(row=2, column=0, sticky="ew", padx=5, pady=5)
+        # 3. 버튼 영역 (추가 / 전체삭제)
+        self.btn_frame = ctk.CTkFrame(self, fg_color="transparent")
+        self.btn_frame.grid(row=2, column=0, sticky="ew", padx=5, pady=5)
+        self.btn_frame.grid_columnconfigure(0, weight=1) # 추가 버튼 비중
+        self.btn_frame.grid_columnconfigure(1, weight=0) # 삭제 버튼 비중 (고정 크기 느낌)
+
+        # [항목 추가 버튼] (초록색)
+        self.btn_add = ctk.CTkButton(self.btn_frame, text="+ 항목 추가", font=("Malgun Gothic", 14, "bold"), height=35,
+                                     command=self.add_item_dialog, fg_color="#2CC985", hover_color="#229C68")
+        self.btn_add.grid(row=0, column=0, sticky="ew", padx=(0, 5))
+
+        # [전체 삭제 버튼] (빨간색) - 신규 추가됨
+        self.btn_clear_all = ctk.CTkButton(self.btn_frame, text="🗑️ 모두 삭제", font=("Malgun Gothic", 14, "bold"), height=35,
+                                           width=100, # 너비 고정
+                                           command=self.clear_all_items, fg_color="#FF4757", hover_color="#C0392B")
+        self.btn_clear_all.grid(row=0, column=1, sticky="ew")
 
         self.load_data(initial_value)
 
@@ -46,31 +52,23 @@ class StringListEditor(ctk.CTkFrame):
     def render_items(self):
         for widget in self.scroll_frame.winfo_children():
             widget.destroy()
-
         for idx, item_text in enumerate(self.items):
-            item_card = ctk.CTkFrame(
-                self.scroll_frame, fg_color="#333333", 
-                border_color="#555555", border_width=2, corner_radius=6
-            )
+            item_card = ctk.CTkFrame(self.scroll_frame, fg_color="#333333", border_color="#555555", border_width=2, corner_radius=6)
             item_card.grid(row=idx, column=0, sticky="ew", padx=0, pady=3)
             item_card.grid_columnconfigure(0, weight=1)
-
-            # 항목 텍스트
-            lbl = ctk.CTkLabel(
-                item_card, text=item_text, 
-                font=("Malgun Gothic", 15), 
-                anchor="w", wraplength=380
-            )
+            
+            lbl = ctk.CTkLabel(item_card, text=item_text, font=("Malgun Gothic", 15), anchor="w", wraplength=350)
             lbl.grid(row=0, column=0, sticky="w", padx=10, pady=8)
-
-            btn_del = ctk.CTkButton(
-                item_card, text="삭제", 
-                width=60, height=28,
-                font=("Malgun Gothic", 12),
-                fg_color="#FF4757", hover_color="#E04050",
-                command=lambda i=idx: self.delete_item(i)
-            )
+            
+            btn_del = ctk.CTkButton(item_card, text="삭제", width=50, height=28, font=("Malgun Gothic", 12),
+                                    fg_color="#FF4757", hover_color="#E04050", command=lambda i=idx: self.delete_item(i))
             btn_del.grid(row=0, column=1, sticky="e", padx=10, pady=8)
+    
+    def add_items(self, new_items_list):
+        for item in new_items_list:
+            if item not in self.items:
+                self.items.append(item)
+        self.render_items()
 
     def add_item_dialog(self):
         dialog = ctk.CTkInputDialog(text="추가할 값을 입력하세요:", title="항목 추가")
@@ -84,6 +82,18 @@ class StringListEditor(ctk.CTkFrame):
             del self.items[index]
             self.render_items()
 
+    # [신규 기능] 전체 삭제 (확인 메시지 포함)
+    def clear_all_items(self):
+        if not self.items:
+            return # 목록이 비어있으면 아무것도 안 함
+
+        # 확인 메시지 박스 띄우기
+        ans = messagebox.askyesno("전체 삭제 확인", 
+                                  f"[{self.title_text}]\n\n모든 항목을 삭제하시겠습니까?\n이 작업은 되돌릴 수 없습니다.")
+        if ans:
+            self.items = []
+            self.render_items()
+
     def get_value(self):
         return ", ".join(self.items)
 
@@ -92,7 +102,7 @@ class ConfigWindow(ctk.CTkToplevel):
     def __init__(self, parent, config_manager, save_callback):
         super().__init__(parent)
         self.title("설정 (Configuration)")
-        self.geometry("650x800")
+        self.geometry("700x850") 
         self.resizable(False, True)
         
         self.cm = config_manager
@@ -102,81 +112,167 @@ class ConfigWindow(ctk.CTkToplevel):
         self.main_frame = ctk.CTkFrame(self, fg_color="transparent")
         self.main_frame.pack(fill="both", expand=True, padx=20, pady=20)
         
-        # ==========================================================
-        # [수정됨] 헤더 영역 (제목 + 저장 버튼)
-        # ==========================================================
+        # 헤더
         self.header_frame = ctk.CTkFrame(self.main_frame, fg_color="transparent")
         self.header_frame.pack(fill="x", pady=(0, 15))
-
-        # 제목 (왼쪽 정렬)
-        self.lbl_title = ctk.CTkLabel(
-            self.header_frame, 
-            text="⚙️ 환경 설정", 
-            font=("Malgun Gothic", 24, "bold")
-        )
+        self.lbl_title = ctk.CTkLabel(self.header_frame, text="⚙️ 환경 설정", font=("Malgun Gothic", 24, "bold"))
         self.lbl_title.pack(side="left")
-
-        # 저장 버튼 (오른쪽 정렬 - 상단으로 이동)
-        self.btn_save = ctk.CTkButton(
-            self.header_frame, 
-            text="💾 저장 및 닫기", 
-            font=("Malgun Gothic", 14, "bold"), 
-            height=35,
-            width=120,
-            fg_color="#3B8ED0", 
-            hover_color="#36719F",
-            command=self.save_config
-        )
+        self.btn_save = ctk.CTkButton(self.header_frame, text="💾 저장 및 닫기", font=("Malgun Gothic", 14, "bold"), 
+                                      height=35, width=120, fg_color="#3B8ED0", hover_color="#36719F", command=self.save_config)
         self.btn_save.pack(side="right")
         
-        # ==========================================================
-        # 스크롤 가능한 메인 영역
-        # ==========================================================
-        self.scrollable_frame = ctk.CTkScrollableFrame(self.main_frame, width=580, height=600)
+        # 스크롤 영역
+        self.scrollable_frame = ctk.CTkScrollableFrame(self.main_frame, width=640, height=600)
         self.scrollable_frame.pack(fill="both", expand=True)
 
-        # 1. API 키 설정
-        self.gemini_editor = StringListEditor(
-            self.scrollable_frame, title="Gemini API Key 관리", 
-            initial_value=self.cm.get_val("GEMINI_API_KEY"), height=150
-        )
-        self.gemini_editor.pack(fill="x", pady=15)
+        # ==========================================================
+        # 1. [섹션] API Key 관리
+        # ==========================================================
+        self.sec_api = self._create_section_frame(self.scrollable_frame, "🔑 API Key 관리", color="#2E3033")
+        
+        self.gemini_editor = StringListEditor(self.sec_api, title="Gemini API Key", initial_value=self.cm.get_val("GEMINI_API_KEY"), height=100)
+        self.gemini_editor.pack(fill="x", pady=10)
 
-        self.kipris_editor = StringListEditor(
-            self.scrollable_frame, title="KIPRIS API Key 관리", 
-            initial_value=self.cm.get_val("KIPRIS_API_KEY"), height=150
-        )
-        self.kipris_editor.pack(fill="x", pady=15)
+        self.kipris_editor = StringListEditor(self.sec_api, title="KIPRIS API Key", initial_value=self.cm.get_val("KIPRIS_API_KEY"), height=100)
+        self.kipris_editor.pack(fill="x", pady=10)
 
-        # 2. 수집 설정
-        self.target_editor = StringListEditor(
-            self.scrollable_frame, title="수집 키워드 (Target Items)", 
-            initial_value=self.cm.get_val("TARGET_ITEMS"), height=200
-        )
-        self.target_editor.pack(fill="x", pady=15)
 
-        self.url_editor = StringListEditor(
-            self.scrollable_frame, title="쇼핑몰 URL 목록 (Shop URLs)", 
-            initial_value=self.cm.get_val("SHOP_URLS"), height=150
-        )
-        self.url_editor.pack(fill="x", pady=15)
+        # ==========================================================
+        # 2. [섹션] 키워드 & 네이버 추천
+        # ==========================================================
+        self.sec_keyword = self._create_section_frame(self.scrollable_frame, "🛒 수집 키워드 및 자동 추천", color="#1A2E22")
+        
+        # (1) 수집 키워드 리스트
+        self.target_editor = StringListEditor(self.sec_keyword, title="수집할 키워드 목록 (Target Items)", initial_value=self.cm.get_val("TARGET_ITEMS"), height=200)
+        self.target_editor.pack(fill="x", pady=(10, 5))
 
-        # 3. 일반 설정
-        self._create_label("한 키워드당 수집 개수")
-        self.entry_count = ctk.CTkEntry(self.scrollable_frame, width=200, height=40, font=("Malgun Gothic", 14))
-        self.entry_count.pack(pady=(5, 20), anchor="w", padx=5)
+        # (2) 네이버 추천 실행 버튼
+        self.naver_cat_map = {
+            "패션의류": "50000000", "패션잡화": "50000001", "화장품/미용": "50000002",
+            "디지털/가전": "50000003", "가구/인테리어": "50000004", "출산/육아": "50000005",
+            "식품": "50000006", "스포츠/레저": "50000007", "생활/건강": "50000008",
+            "여가/생활편의": "50000009", "면세점": "50000010"
+        }
+
+        self.naver_action_frame = ctk.CTkFrame(self.sec_keyword, fg_color="transparent")
+        self.naver_action_frame.pack(fill="x", pady=(5, 15)) 
+
+        self.combo_cat = ctk.CTkComboBox(self.naver_action_frame, values=list(self.naver_cat_map.keys()), font=("Malgun Gothic", 13), width=150, state="readonly")
+        self.combo_cat.pack(side="left", padx=(0, 10))
+        self.combo_cat.set("생활/건강")
+
+        self.btn_recommend = ctk.CTkButton(self.naver_action_frame, text="📈 네이버 트렌드 TOP 10 가져오기", 
+                                           font=("Malgun Gothic", 14, "bold"), height=40, fg_color="#03C75A", hover_color="#029F48",
+                                           command=self.run_naver_recommendation)
+        self.btn_recommend.pack(side="left", fill="x", expand=True)
+
+
+        # ==========================================================
+        # 3. [섹션] 쇼핑몰 URL
+        # ==========================================================
+        self.sec_url = self._create_section_frame(self.scrollable_frame, "🌐 쇼핑몰 관리", color="#2E3033")
+        
+        self.url_editor = StringListEditor(self.sec_url, title="쇼핑몰 URL 목록", initial_value=self.cm.get_val("SHOP_URLS"), height=150)
+        self.url_editor.pack(fill="x", pady=10)
+
+
+        # ==========================================================
+        # 4. [섹션] 일반 설정
+        # ==========================================================
+        self.sec_general = self._create_section_frame(self.scrollable_frame, "🛠️ 일반 설정", color="#2E3033")
+
+        self._create_sub_label(self.sec_general, "한 키워드당 수집 개수")
+        self.entry_count = ctk.CTkEntry(self.sec_general, width=200, height=35, font=("Malgun Gothic", 14))
+        self.entry_count.pack(pady=(5, 15), anchor="w")
         self.entry_count.insert(0, self.cm.get_val("ITEM_COUNT"))
 
-        self._create_label("저장할 엑셀 파일명")
-        self.entry_excel = ctk.CTkEntry(self.scrollable_frame, width=500, height=40, font=("Malgun Gothic", 14))
-        self.entry_excel.pack(pady=(5, 20), anchor="w", padx=5)
+        self._create_sub_label(self.sec_general, "저장할 엑셀 파일명")
+        self.entry_excel = ctk.CTkEntry(self.sec_general, width=400, height=35, font=("Malgun Gothic", 14))
+        self.entry_excel.pack(pady=(5, 15), anchor="w")
         self.entry_excel.insert(0, self.cm.get_val("EXCEL_FILE"))
 
-        # (하단에 있던 저장 버튼 코드는 삭제됨)
 
-    def _create_label(self, text):
-        label = ctk.CTkLabel(self.scrollable_frame, text=text, font=("Malgun Gothic", 16, "bold"), text_color="#3B8ED0")
-        label.pack(anchor="w", padx=5, pady=(5, 0))
+    # --- Helper Methods ---
+    def _create_section_frame(self, parent, title, color):
+        frame = ctk.CTkFrame(parent, fg_color=color, corner_radius=10)
+        frame.pack(fill="x", padx=10, pady=10)
+        lbl = ctk.CTkLabel(frame, text=title, font=("Malgun Gothic", 18, "bold"), text_color="#E0E0E0")
+        lbl.pack(anchor="w", padx=15, pady=(15, 5))
+        inner = ctk.CTkFrame(frame, fg_color="transparent")
+        inner.pack(fill="both", expand=True, padx=15, pady=(0, 15))
+        return inner
+
+    def _create_sub_label(self, parent, text):
+        label = ctk.CTkLabel(parent, text=text, font=("Malgun Gothic", 14, "bold"), text_color="#AAAAAA")
+        label.pack(anchor="w", pady=(5, 0))
+
+    def _create_input_field(self, parent, placeholder, initial_value):
+        entry = ctk.CTkEntry(parent, placeholder_text=placeholder, height=35, font=("Malgun Gothic", 12))
+        if initial_value: entry.insert(0, initial_value)
+        return entry
+
+    # --- Actions ---
+    def run_naver_recommendation(self):
+        """네이버 데이터랩 인기 검색어 가져오기"""
+        
+        selected_name = self.combo_cat.get()
+        selected_code = self.naver_cat_map.get(selected_name, "50000008") 
+        
+        # 2일 전 데이터 요청
+        target_date = (datetime.date.today() - datetime.timedelta(days=2)).strftime("%Y-%m-%d")
+        
+        url = "https://datalab.naver.com/shoppingInsight/getCategoryKeywordRank.naver"
+        
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/110.0.0.0 Safari/537.36",
+            "Referer": "https://datalab.naver.com/shoppingInsight/sCategory.naver",
+            "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
+            "Origin": "https://datalab.naver.com"
+        }
+        
+        data = {
+            "cid": selected_code,
+            "timeUnit": "date",
+            "startDate": target_date,
+            "endDate": target_date,
+            "age": "",
+            "gender": "",
+            "device": "",
+            "page": "1",
+            "count": "20"
+        }
+
+        try:
+            response = requests.post(url, headers=headers, data=data)
+            
+            if response.status_code == 200:
+                try:
+                    result_json = response.json()
+                except:
+                    messagebox.showerror("파싱 오류", "응답이 JSON 형식이 아닙니다.")
+                    return
+
+                # 딕셔너리 구조에서 바로 'ranks' 키를 찾음
+                if isinstance(result_json, dict) and 'ranks' in result_json:
+                    ranks = result_json['ranks']
+                    keywords = [r['keyword'] for r in ranks[:10]]
+                    
+                    if keywords:
+                        self.target_editor.add_items(keywords)
+                        messagebox.showinfo("성공", f"'{selected_name}' 인기 키워드 TOP 10을 추가했습니다!\n({target_date} 기준)")
+                    else:
+                        messagebox.showinfo("결과 없음", "순위 데이터가 비어있습니다.")
+                
+                else:
+                    import json
+                    raw_msg = json.dumps(result_json, ensure_ascii=False, indent=2)
+                    messagebox.showerror("응답 구조 오류", f"'ranks' 키를 찾을 수 없습니다.\n\n[응답 원본]\n{raw_msg}")
+
+            else:
+                messagebox.showerror("통신 오류", f"상태 코드: {response.status_code}\n내용: {response.text[:100]}")
+                
+        except Exception as e:
+            messagebox.showerror("시스템 오류", f"에러 발생: {e}")
 
     def save_config(self):
         gemini_keys = self.gemini_editor.get_value()

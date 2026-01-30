@@ -27,53 +27,63 @@ class ExcelHandler:
 
     def find_best_category(self, ai_path_hint, platform='coupang'):
         """
-        AI가 제안한 경로(ai_path_hint)와 가장 유사한 엑셀 카테고리를 찾습니다.
-        단순 포함 여부가 아니라, '일치하는 단어 개수(Score)'가 가장 높은 것을 선택합니다.
+        [개선된 알고리즘]
+        1. 단순 포함(in) 대신 단어 단위 분리(Split) 후 일치 여부 확인
+        2. 경로의 '마지막 단어'가 정확히 일치하면 가산점 부여
+        3. 점수가 같으면 '더 짧은 경로'를 선택 (군더더기 없는 매칭 선호)
         """
         df = self.coupang_cat if platform == 'coupang' else self.naver_cat
         if df is None or not ai_path_hint: return ""
         
         target_col = '여기서 카테고리를 복사해주세요'
         
-        # AI 힌트를 단어 단위로 쪼갬 (예: "가구 > 조명" -> ['가구', '조명'])
-        hint_keywords = [k.strip() for k in ai_path_hint.replace('>', ' ').split() if len(k.strip()) > 1]
+        # 1. AI 힌트 전처리 (특수문자 제거 및 리스트화)
+        # 예: "문구 > 필기구 > 연필" -> ['문구', '필기구', '연필']
+        hint_keywords = [k.strip() for k in ai_path_hint.replace('>', ' ').split() if len(k.strip()) > 0]
+        if not hint_keywords: return ""
         
-        best_match = ""
-        max_score = 0
-        
-        # 데이터프레임 순회는 느리므로, 후보군을 먼저 추리기 위해 핵심 키워드(마지막 단어)로 필터링
-        # 하지만 정확도를 위해 전체 검색을 하되, 점수제를 도입합니다.
-        
-        # (성능 최적화) 힌트의 마지막 단어(가장 구체적인 단어)가 포함된 행만 1차 필터링
-        if hint_keywords:
-            last_keyword = hint_keywords[-1]
-            # na=False로 NaN 처리
-            candidates = df[df[target_col].str.contains(last_keyword, na=False, case=False)]
-            
-            if candidates.empty:
-                # 마지막 단어가 없으면 전체에서 검색 (느리지만 안전하게)
-                candidates = df
-        else:
-            candidates = df
+        hint_last_word = hint_keywords[-1] # 핵심 키워드 (예: 연필)
 
-        # 후보군 중에서 점수 계산
+        best_match = ""
+        max_score = -1 # 초기값
+        
+        # 후보군 필터링 (속도 최적화: 핵심 단어가 포함된 것만 1차 조회)
+        candidates = df[df[target_col].str.contains(hint_last_word, na=False, case=False)]
+        if candidates.empty:
+            candidates = df # 없으면 전체 검색
+
         for cat_path in candidates[target_col]:
             if not isinstance(cat_path, str): continue
             
-            score = 0
-            # 힌트의 단어들이 해당 카테고리 경로에 몇 개나 들어있는지 카운트
-            for kw in hint_keywords:
-                if kw in cat_path:
-                    score += 1
+            # 2. 카테고리 경로를 단어 단위로 쪼개기 (Tokenization)
+            # 구분자(>, /)를 모두 공백으로 바꾸고 리스트로 만듦
+            # 예: "문구/사무용품>연필꽂이" -> ['문구', '사무용품', '연필꽂이']
+            cat_tokens = cat_path.replace('>', ' ').replace('/', ' ').split()
+            cat_tokens = [t.strip() for t in cat_tokens if t.strip()]
             
-            # 힌트 단어가 많이 포함될수록, 그리고 길이가 비슷할수록 좋은 매칭
+            score = 0
+            
+            # [채점 기준 1] 단어 일치 개수 (Set Intersection 개념)
+            # '연필'을 찾는데 '연필꽂이' 토큰은 '연필'과 다르므로 매칭되지 않음
+            for kw in hint_keywords:
+                if kw in cat_tokens: 
+                    score += 10 # 단순 포함보다 높은 점수 부여
+                elif kw in cat_path: 
+                    score += 1  # (보조) 단어는 안 맞지만 글자가 포함되면 소폭 점수 (예: 띄어쓰기 차이)
+
+            # [채점 기준 2] 마지막 단어(Leaf Category) 완전 일치 보너스 (핵심!)
+            if cat_tokens and (cat_tokens[-1] == hint_last_word):
+                score += 50 # 강력한 가산점 (확실한 타겟)
+
+            # [갱신 로직]
             if score > max_score:
                 max_score = score
                 best_match = cat_path
-            elif score == max_score and score > 0:
-                # 점수가 같으면 더 짧은 것(상위 카테고리 오매칭 방지) 혹은 더 긴 것?
-                # 보통 더 구체적인 것(긴 것)이 좋음
-                if len(cat_path) > len(best_match):
+            
+            elif score == max_score:
+                # [동점 처리 수정] 더 짧은 것을 선택!
+                # 이유: '연필'(짧음)이 '연필 교정 그립'(김)보다 사용자의 의도에 가까울 확률이 높음 (일반화)
+                if len(cat_path) < len(best_match):
                     best_match = cat_path
 
         return best_match
