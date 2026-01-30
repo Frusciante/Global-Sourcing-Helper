@@ -1,51 +1,46 @@
-import os
 import time
 import json
-import shutil
-import subprocess
 import requests
 import xml.etree.ElementTree as ET
-import pandas as pd
-import openpyxl
-from tkinter import messagebox
-
-# [중요] 외부 라이브러리
 import google.generativeai as genai 
-from selenium import webdriver
-from selenium.webdriver.chrome.service import Service
-from selenium.webdriver.chrome.options import Options
-from selenium.webdriver.common.by import By
-from selenium.webdriver.common.keys import Keys
-from selenium.webdriver.support.ui import WebDriverWait
-from selenium.webdriver.support import expected_conditions as EC
-from selenium.common.exceptions import WebDriverException, TimeoutException
-from webdriver_manager.chrome import ChromeDriverManager
+from selenium.common.exceptions import WebDriverException
+from tkinter import messagebox # [필수] 에러 팝업용 추가
+
+# 분리된 모듈 임포트
+from logic.excel_handler import ExcelHandler
+from logic.browser_manager import BrowserManager
 
 class SourcingProcessor:
     def __init__(self, config, log_callback):
         self.config = config
         self.log_callback = log_callback
         self.is_running = True
-        self.target_file = self.config.get('EXCEL_FILE', 'windly-excel-bulk-upload-ver9.xlsx')
+        self.attempt_count = 0
         
-        # API 키 설정
+        # 1. 엑셀 핸들러
+        excel_file = self.config.get('EXCEL_FILE', 'windly-excel-bulk-upload-ver9.xlsx')
+        self.excel = ExcelHandler(excel_file, log_callback)
+        
+        # 2. 브라우저 매니저
+        self.browser = BrowserManager(log_callback)
+
+        # 3. AI 설정
         raw_keys = self.config['GEMINI_API_KEY']
         self.api_keys = [k.strip() for k in raw_keys.split(',') if k.strip()]
         self.current_key_idx = 0
         
-        # 모델 설정
+        # 4. KIPRIS 키 설정
+        raw_kipris = self.config['KIPRIS_API_KEY']
+        self.kipris_keys = [k.strip() for k in raw_kipris.split(',') if k.strip()]
+        self.current_kipris_idx = 0
+        
+        # [설정] 모델 후보군
         self.model_candidates = [
-            "gemini-2.5-flash", 
-            "gemini-2.5-flash-lite", 
-            "gemini-2.0-flash",
-            "gemini-1.5-flash"
+            "gemini-2.5-flash",      
+            "gemini-2.5-flash-lite" 
         ]
         self.current_model_idx = 0
         self.model = None 
-        self.proc = None
-
-        self.log_callback("📋 [초기화] 설정 로드 및 카테고리 데이터 준비 중...")
-        self.load_categories_from_excel()
 
         try:
             self._configure_genai()
@@ -53,470 +48,290 @@ class SourcingProcessor:
             self.log_callback(f"❌ [Error] Gemini 초기 설정 실패: {e}")
 
     # ==========================
-    # 1. AI 설정 및 로테이션
+    # [NEW] 공통 키 로테이션 로직
     # ==========================
-    def _configure_genai(self):
-        if not self.api_keys: 
-            self.log_callback("❌ [Config] API 키가 없습니다.")
-            return
-        current_key = self.api_keys[self.current_key_idx]
-        masked_key = f"{current_key[:5]}...{current_key[-5:]}"
+    def _rotate_index(self, keys, current_idx, service_name):
+        """키 리스트와 현재 인덱스를 받아 다음 인덱스를 반환하는 공통 함수"""
+        if len(keys) <= 1:
+            self.log_callback(f"⚠️ [{service_name}] 교체할 여분 키가 없습니다.")
+            return current_idx, False
         
+        new_idx = (current_idx + 1) % len(keys)
+        self.log_callback(f"🔄 [{service_name}] 키 교체 ({new_idx + 1}/{len(keys)})")
+        return new_idx, True
+
+    # ==========================
+    # AI 관련 로직 (Gemini)
+    # ==========================
+    # [수정 1] 설정 실패 시 self.model을 확실하게 None으로 초기화
+    def _configure_genai(self):
+        if not self.api_keys: return
+        current_key = self.api_keys[self.current_key_idx]
         try:
             genai.configure(api_key=current_key)
             model_name = self.model_candidates[self.current_model_idx]
-            self.log_callback(f"🔑 [AI] 키 적용 완료 ({self.current_key_idx + 1}/{len(self.api_keys)}) | 모델: {model_name}")
+            self.log_callback(f"🔑 [AI] 키 설정 ({self.current_key_idx + 1}/{len(self.api_keys)}) | 모델: {model_name}")
             self.model = genai.GenerativeModel(model_name)
         except Exception as e:
             self.log_callback(f"❌ [AI] 설정 오류: {e}")
+            self.model = None # [중요] 실패하면 None으로 만들어서 억지로 실행되는 것 방지
 
     def _rotate_api_key(self):
-        if len(self.api_keys) <= 1: 
-            self.log_callback("⚠️ [AI] 교체할 여분 키가 없습니다.")
+        """Gemini 키 교체 (공통 함수 사용)"""
+        self.current_key_idx, success = self._rotate_index(self.api_keys, self.current_key_idx, "AI")
+        if success:
+            self._configure_genai() # Gemini는 재설정이 필요함
+        return success
+
+    def _switch_model(self):
+        if len(self.model_candidates) <= 1: return False
+        
+        self.current_model_idx = (self.current_model_idx + 1) % len(self.model_candidates)
+        new_model_name = self.model_candidates[self.current_model_idx]
+        
+        self.log_callback(f"⚠️ [AI] 모델 한도 초과 예상 -> '{new_model_name}'(으)로 모델 변경 시도!")
+        try:
+            self.model = genai.GenerativeModel(new_model_name)
+            return True
+        except Exception as e:
+            self.log_callback(f"❌ [AI] 모델 변경 실패: {e}")
             return False
-        self.current_key_idx = (self.current_key_idx + 1) % len(self.api_keys)
-        self.log_callback("🔄 [AI] 한도 초과 감지! 다음 키로 교체합니다...")
-        self._configure_genai()
-        return True
 
     def _call_gemini_with_retry(self, prompt, context=""):
-        max_retries = 3
-        for attempt in range(max_retries):
+        # 총 시도 가능 횟수 = (키 개수) * (모델 개수)
+        total_combinations = len(self.api_keys) * len(self.model_candidates)
+        if total_combinations == 0: total_combinations = 1
+        
+        while self.attempt_count < total_combinations:
             try:
+                # 1. 모델 객체 확인 및 복구
                 if not self.model: self._configure_genai()
+                if not self.model: raise Exception("모델 객체 생성 실패")
+
+                # 2. 실행
                 response = self.model.generate_content(prompt)
+                
                 if response and response.text: 
-                    return response.text.strip()
+                    return response.text.replace('```json', '').replace('```', '').strip()
+
             except Exception as e:
                 error_msg = str(e).lower()
-                if "429" in error_msg or "quota" in error_msg:
-                    self.log_callback(f"⏳ [AI] 429 Too Many Requests ({context}). 키 교체 시도.")
-                    if self._rotate_api_key(): 
-                        time.sleep(1)
-                        continue
-                    time.sleep(10)
-                    continue
-                elif "404" in error_msg:
-                    self.log_callback(f"⚠️ [AI] 모델 오류. 모델 변경.")
-                    self.current_model_idx = (self.current_model_idx + 1) % len(self.model_candidates)
-                    self.model = genai.GenerativeModel(self.model_candidates[self.current_model_idx])
-                    continue
-                else:
-                    self.log_callback(f"⚠️ [AI] 오류 발생: {error_msg}")
-                    return None
-        return None
-
-    # ==========================
-    # 2. 엑셀 및 데이터 처리
-    # ==========================
-    def load_categories_from_excel(self):
-        try:
-            if not os.path.exists(self.target_file): 
-                self.log_callback(f"⚠️ [Excel] 파일 없음: {self.target_file}")
-                return
-            self.coupang_cat = pd.read_excel(self.target_file, sheet_name='쿠팡 전체 카테고리 (240517)')
-            self.naver_cat = pd.read_excel(self.target_file, sheet_name='네이버 전체 카테고리 (251215)')
-            self.log_callback(f"✅ [Excel] 카테고리 데이터 로드 완료")
-        except Exception as e:
-            self.log_callback(f"❌ [Excel] 로드 실패: {e}")
-
-    def find_best_category(self, hint, platform='coupang'):
-        df = self.coupang_cat if platform == 'coupang' else self.naver_cat
-        if df is None: return ""
-        target_col = '여기서 카테고리를 복사해주세요'
-        keywords = hint.replace('>', ' ').split()
-        for kw in reversed(keywords):
-            if len(kw.strip()) < 2: continue
-            match = df[df[target_col].str.contains(kw, na=False, case=False)]
-            if not match.empty: return match.iloc[0][target_col]
-        return ""
-
-    # [수정된 함수] 카테고리를 확정할 때까지 절대 넘어가지 않음
-    def determine_master_category(self, keyword):
-        self.log_callback(f"🧠 [Category] '{keyword}'의 대표 카테고리 분석 중...")
-        prompt = (
-            f"검색어: '{keyword}'\n"
-            f"이 검색어가 속할 가장 적절한 한국 이커머스 카테고리 경로를 하나만 추론해줘.\n"
-            f"예시: 가구/인테리어 > 인테리어 조명 > 단스탠드\n"
-            f"설명 없이 경로만 출력해."
-        )
-
-        # 성공할 때까지 무한 반복 (While Loop)
-        while self.is_running:
-            cat_hint = self._call_gemini_with_retry(prompt, "카테고리 결정")
-            
-            if cat_hint:
-                # 성공 시 바로 처리 후 반환
-                cp = self.find_best_category(cat_hint, 'coupang')
-                nv = self.find_best_category(cat_hint, 'naver')
-                self.log_callback(f"   ㄴ 결정됨: [쿠팡] {cp} / [네이버] {nv}")
-                return cp, nv
-            
-            # 실패 시 (None 반환됨): 절대 넘어가지 않고 대기
-            self.log_callback(f"⛔ [Critical] 카테고리 분석 실패 (AI 한도 초과). 30초 대기 후 재시도합니다...")
-            self.log_callback(f"   (이 단계는 필수이므로 건너뛰지 않습니다)")
-            
-            # 30초 동안 대기 (사용자가 중지 버튼 누르면 바로 탈출하도록 1초씩 30번 쉼)
-            for _ in range(30):
-                if not self.is_running: return "", ""
-                time.sleep(1)
-            
-            # 루프의 처음으로 돌아가서 다시 AI 호출 시도
-            self.log_callback("🔄 카테고리 분석 재시도...")
-
-        return "", ""
-
-    def append_to_excel(self, data_row):
-        try:
-            wb = openpyxl.load_workbook(self.target_file)
-            ws = wb['엑셀 수집 양식 (Ver.9)']
-            
-            start_row = 7
-            while ws.cell(row=start_row, column=4).value is not None:
-                start_row += 1
-            
-            tags_value = data_row['tags']
-            if isinstance(tags_value, list):
-                tags_value = ", ".join(tags_value)
-            
-            # [중요] data_row에 이미 고정된 카테고리가 들어있음
-            ws.cell(row=start_row, column=2, value=data_row['cp_cat'])
-            ws.cell(row=start_row, column=3, value=data_row['nv_cat'])
-            ws.cell(row=start_row, column=4, value=data_row['title'])
-            ws.cell(row=start_row, column=5, value=tags_value)
-            ws.cell(row=start_row, column=6, value=data_row['url'])
-            ws.cell(row=start_row, column=7, value=0)
-            ws.cell(row=start_row, column=8, value='무료')
-            ws.cell(row=start_row, column=9, value=0)
-            ws.cell(row=start_row, column=10, value=5000)
-            ws.cell(row=start_row, column=11, value=10000)
-            ws.cell(row=start_row, column=12, value=data_row['manufacturer'])
-            ws.cell(row=start_row, column=13, value=data_row['brand'])
-            ws.cell(row=start_row, column=14, value=data_row['model'])
-            
-            wb.save(self.target_file)
-            self.log_callback(f"💾 [Excel] {start_row}행 저장 | {data_row['title'][:10]}...")
-        except Exception as e:
-            self.log_callback(f"❌ [Excel] 저장 실패: {e}")
-
-    # ==========================
-    # 3. 브라우저 및 탐색
-    # ==========================
-    def init_driver(self):
-        try:
-            subprocess.run("taskkill /F /IM chrome.exe /T", shell=True, stderr=subprocess.DEVNULL)
-            time.sleep(1)
-        except: pass
-
-        current_folder = os.getcwd()
-        bot_profile_path = os.path.join(current_folder, "bot_profile")
-        real_user_data = os.path.join(os.environ['LOCALAPPDATA'], 'Google', 'Chrome', 'User Data')
-
-        if not os.path.exists(bot_profile_path):
-            self.log_callback("♻️ [Init] 프로필 복제 중... (최초 1회)")
-            try:
-                shutil.copytree(real_user_data, bot_profile_path, ignore=shutil.ignore_patterns('*.lock', 'Singleton*', '*.tmp', 'Cache*', 'Code Cache*'))
-            except: pass
-
-        chrome_exe_path = r"C:\Program Files\Google\Chrome\Application\chrome.exe"
-        if not os.path.exists(chrome_exe_path): chrome_exe_path = r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe"
-        
-        debug_port = 9222
-        cmd = [
-            chrome_exe_path,
-            f"--remote-debugging-port={debug_port}",
-            f"--user-data-dir={bot_profile_path}",
-            "--profile-directory=Default",
-            "--no-first-run", "--remote-allow-origins=*"
-        ]
-        
-        self.log_callback(f"🚀 [Init] 크롬 프로세스 시작")
-        self.proc = subprocess.Popen(cmd)
-        time.sleep(3)
-
-        chrome_options = Options()
-        chrome_options.add_experimental_option("debuggerAddress", f"127.0.0.1:{debug_port}")
-        
-        try:
-            service = Service(ChromeDriverManager().install())
-            driver = webdriver.Chrome(service=service, options=chrome_options)
-            self.log_callback("✅ [Init] Selenium 연결 성공")
-            return driver
-        except Exception as e:
-            self.log_callback(f"❌ [Init] 연결 실패: {e}")
-            raise e
-
-    def detect_and_translate(self, url, html_source, keyword):
-        try:
-            target_lang = None
-            if any(site in url for site in ['taobao', 'tmall', '1688']): target_lang = "중국어 간체"
-            elif any(site in url for site in ['rakuten', 'yahoo']): target_lang = "일본어"
-            elif any(site in url for site in ['amazon', 'ebay']): target_lang = "영어"
-
-            if target_lang:
-                self.log_callback(f"🌐 [Trans] 타겟 언어: {target_lang}")
-                trans_prompt = f"쇼핑 검색어 '{keyword}'를 '{target_lang}'로 번역해줘. 단어만 출력."
-                translated = self._call_gemini_with_retry(trans_prompt, "번역")
-                if translated: 
-                    self.log_callback(f"   ㄴ 번역: '{keyword}' -> '{translated}'")
-                    return translated
-            return keyword
-        except Exception as e:
-            self.log_callback(f"⚠️ [Trans] 번역 실패: {e}")
-            return keyword
-
-    def get_shopping_products(self, driver, url, keyword, count):
-        while self.is_running:
-            try:
-                self.log_callback(f"🔍 [Search] '{keyword}' 검색 시작...")
+                self.attempt_count += 1 # 실패 횟수 증가
                 
-                # [수정 1] 무조건 메인 페이지로 이동해서 초기화 (가장 안전)
-                driver.get(url)
-                time.sleep(3)
-
-                # 1. 검색창 찾기 (Wait 시간 늘림)
-                search_input = None
-                search_selectors = [
-                    "input#twotabsearchtextbox", # 아마존
-                    "input#q", 
-                    "input[name='q']", 
-                    "input[type='search']",
-                    "input[name='keyword']",
-                    "input[id*='search']"
-                ]
-
-                for sel in search_selectors:
-                    try:
-                        search_input = WebDriverWait(driver, 5).until(
-                            EC.element_to_be_clickable((By.CSS_SELECTOR, sel))
-                        )
-                        if search_input:
-                            self.log_callback(f"   ㄴ 검색창 발견: {sel}")
-                            break
-                    except: continue
-
-                if not search_input:
-                    raise Exception("검색창을 찾을 수 없습니다.")
-
-                # 2. 검색어 입력 및 실행 (3중 안전장치)
-                try:
-                    search_input.click() # 포커스 주기
-                    time.sleep(0.5)
+                # 3. 에러 핸들링
+                if "429" in error_msg or "quota" in error_msg or "resource" in error_msg or "model" in error_msg or "404" in error_msg:
+                    # [수정] 로그에 context 추가 (예: "번역", "카테고리 분석")
+                    self.log_callback(f"⏳ [AI] {context} 중 Gemini API 사용량 초과. ({self.attempt_count}/{total_combinations}). 다음 수단 찾는 중...")
                     
-                    # 기존 내용 지우기 (clear가 안 먹힐 때를 대비해 Ctrl+A -> Del)
-                    search_input.clear()
-                    search_input.send_keys(Keys.CONTROL + "a")
-                    search_input.send_keys(Keys.DELETE)
+                    key_rotated = self._rotate_api_key()
                     
-                    # 입력
-                    search_input.send_keys(keyword)
+                    if (self.current_key_idx == 0) or (not key_rotated):
+                        self.log_callback(f"⚠️ [AI] ({context}) 현재 모델의 모든 키 소진. 모델 변경 시도.")
+                        if not self._switch_model():
+                            pass 
+                    
                     time.sleep(1)
-                    
-                    # [방법 A] 엔터키 전송
-                    search_input.send_keys(Keys.ENTER)
-                    self.log_callback("   ㄴ 1차 시도: 엔터 입력")
-                    
-                    # URL 변화 감지 (검색 성공 여부 확인)
-                    time.sleep(3)
-                    current_url = driver.current_url
-                    
-                    # [방법 B] 엔터로 URL이 안 바뀌었다면 -> 검색 버튼 클릭
-                    if current_url == url or "search" not in current_url:
-                        self.log_callback("   ⚠️ 엔터 반응 없음. 검색 버튼 클릭 시도...")
-                        
-                        btn_selectors = [
-                            "input[type='submit']", 
-                            "button[class*='search']", 
-                            "span[class*='search-icon']", 
-                            "#nav-search-submit-button", # 아마존 전용
-                            "button[type='submit']",
-                            "[aria-label='Go']"
-                        ]
-                        
-                        clicked = False
-                        for btn_sel in btn_selectors:
-                            try:
-                                btn = driver.find_element(By.CSS_SELECTOR, btn_sel)
-                                # [방법 C] 자바스크립트로 강제 클릭 (제일 강력함)
-                                driver.execute_script("arguments[0].click();", btn)
-                                clicked = True
-                                self.log_callback(f"   ㄴ 검색 버튼 강제 클릭 완료 ({btn_sel})")
-                                break
-                            except: pass
-                        
-                        if not clicked:
-                            # 최후의 수단: 폼 자체를 submit
-                            try:
-                                search_input.submit()
-                                self.log_callback("   ㄴ 폼(Form) 강제 제출")
-                            except: pass
-                            
-                    time.sleep(5) # 검색 결과 로딩 대기
-
-                except Exception as e:
-                    self.log_callback(f"❌ [Search] 입력/제출 중 오류: {e}")
-                    raise e
-
-                # 3. 상품 목록 수집
-                selectors = ["[class*='title--']", "[class*='Title--']", "div.title", "div.item-name", "a[id*='item-title']", "h1", "h2", "h3", "span.a-text-normal"]
-                products = []
+                    continue
                 
-                for selector in selectors:
-                    elements = driver.find_elements(By.CSS_SELECTOR, selector)
-                    if not elements: continue
-                    
-                    valid_elements = [el for el in elements if len(el.text.strip()) > 5]
-                    
-                    if valid_elements:
-                        self.log_callback(f"   ㄴ 목록 발견: '{selector}' ({len(valid_elements)}개)")
-                        for el in valid_elements:
-                            product_name = el.text.strip()
-                            product_link = driver.current_url # Fallback
-                            
-                            try:
-                                if el.tag_name == 'a': product_link = el.get_attribute('href')
-                                else:
-                                    try: parent_a = el.find_element(By.XPATH, "./ancestor::a"); product_link = parent_a.get_attribute('href')
-                                    except:
-                                        try: child_a = el.find_element(By.TAG_NAME, "a"); product_link = child_a.get_attribute('href')
-                                        except: pass
-                            except: pass
+                else:
+                    # [수정] 알 수 없는 오류에도 context 표시
+                    self.log_callback(f"⚠️ [AI] {context} 실패: {error_msg}")
+                    time.sleep(1)
+                    continue
 
-                            if product_link == driver.current_url: continue 
-                            products.append((product_name, product_link))
-                        
-                        if len(products) >= 3: break
-                
-                if not products: 
-                    # 검색 결과가 0개면 그냥 빈 리스트 리턴하고 다음 키워드로 넘어가게 (프로그램 종료 방지)
-                    self.log_callback("⚠️ 검색 결과가 없거나 수집 실패. 다음 키워드로 넘어갑니다.")
-                    return []
-                    
-                return products[:count]
-
-            except WebDriverException as we:
-                self.log_callback(f"🚨 [Browser] 연결 끊김 재시작: {we}")
-                raise we
-            except Exception as e:
-                self.log_callback(f"⚠️ [Search] 검색 프로세스 실패: {e}")
-                return []
-
-
-    def extract_full_info(self, p_name):
-        """상품 정보 추출 및 한국어 번역 강화"""
-        prompt = (
-            f"Analyze this product name: '{p_name}'\n"
-            "Task: Extract information and Translate to Korean for e-commerce.\n\n"
-            "Rules:\n"
-            "1. Validity Check: Is this a real product? If it's navigational text (e.g., 'Free Shipping', 'Category', 'Login'), set 'is_valid': false.\n"
-            "2. Brand: If unknown or generic, output strictly 'NULL'. Do not use 'N/A'.\n"
-            "3. Product Title (Crucial): \n"
-            "   - Translate the product name into **natural and attractive Korean** (한국어) suitable for online shopping titles.\n"
-            "   - Remove unnecessary English/Chinese characters, model numbers, or repetitive words.\n"
-            "   - Example: 'Portable Camping Chair Foldable' -> '휴대용 접이식 캠핑 의자'\n"
-            "4. Keywords: Extract 5 relevant keywords in Korean.\n"
-            "5. Category Hint: Category path in Korean.\n\n"
-            "Output JSON format:\n"
-            "{ 'is_valid': true, 'productTitle': '...', 'manufacturer': '...', 'brand': '...', 'model': '...', 'keywords': [], 'category_hint': '...' }"
+        # [최후의 수단]
+        self.log_callback(f"❌ [Critical] '{context}' 작업 중 모든 API 키와 모델 한도 초과.")
+        self.stop()
+        
+        messagebox.showerror(
+            "AI 한도 초과 (비상 정지)", 
+            f"'{context}' 작업을 수행하려 했으나,\n모든 API 키와 모델을 사용해도 실패했습니다.\n\n"
+            "1. 인터넷 연결 확인\n"
+            "2. 내일 다시 시도 (오후 5시 초기화)\n"
+            "3. 새 API 키 추가\n\n"
+            "프로그램을 종료합니다."
         )
-
-        res = self._call_gemini_with_retry(prompt, "정보추출")
-        if res:
-            try:
-                # 마크다운 제거
-                clean_json = res.replace('```json', '').replace('```', '').strip()
-                data = json.loads(clean_json)
-                
-                if not data.get('is_valid', True): 
-                    self.log_callback(f"   🗑️ [Filter] 유효하지 않은 상품 제외: {p_name[:10]}...")
-                    return None
-                
-                # 혹시 AI가 번역을 깜빡했을 경우를 대비한 2차 방어선 (한글이 하나도 없으면 재번역)
-                if not any('\u3131' <= char <= '\u3163' or '\uac00' <= char <= '\ud7a3' for char in data['productTitle']):
-                    self.log_callback("   ⚠️ [AI] 제목 번역 누락 감지 -> 강제 번역 시도")
-                    trans_prompt = f"Translate this product title into natural Korean: '{data['productTitle']}'"
-                    korean_title = self._call_gemini_with_retry(trans_prompt, "제목 강제번역")
-                    if korean_title:
-                        data['productTitle'] = korean_title
-
-                return data
-            except json.JSONDecodeError: 
-                self.log_callback("   ⚠️ [AI] JSON 파싱 실패 (형식 오류)")
-                return None
-            except Exception as e:
-                self.log_callback(f"   ⚠️ [Extract] 데이터 처리 오류: {e}")
-                return None
         return None
+
+    # ==========================
+    # KIPRIS 관련 로직
+    # ==========================
+    def _rotate_kipris_key(self):
+        """KIPRIS 키 교체 (공통 함수 사용)"""
+        self.current_kipris_idx, success = self._rotate_index(self.kipris_keys, self.current_kipris_idx, "KIPRIS")
+        return success
 
     def check_trademark(self, brand):
         if not brand or str(brand).upper() in ["NULL", "NONE", "N/A"]: return True
-        api_url = "https://plus.kipris.or.kr/kipo-api/kipi/trademarkInfoSearchService/getWordSearch"
-        params = {'searchString': brand, 'ServiceKey': self.config['KIPRIS_API_KEY']}
-        try:
-            res = requests.get(api_url, params=params, timeout=5)
-            if res.status_code != 200: return True
-            root = ET.fromstring(res.content)
-            count = int(root.find(".//totalCount").text)
-            if count > 0:
-                self.log_callback(f"   ❌ [KIPRIS] 상표권 발견! '{brand}' ({count}건)")
-                return False
-            return True
-        except: return True 
+        if not self.kipris_keys: return True 
 
-    # [핵심] 런 루프 변경
+        api_url = "https://plus.kipris.or.kr/kipo-api/kipi/trademarkInfoSearchService/getWordSearch"
+        
+        max_retries = 3
+        for attempt in range(max_retries):
+            current_key = self.kipris_keys[self.current_kipris_idx]
+            params = {'searchString': brand, 'ServiceKey': current_key}
+            
+            try:
+                res = requests.get(api_url, params=params, timeout=5)
+                if res.status_code != 200:
+                    self.log_callback(f"⚠️ [KIPRIS] 서버 오류({res.status_code}). 키 교체 시도...")
+                    if self._rotate_kipris_key(): continue
+                    return True 
+
+                root = ET.fromstring(res.content)
+                error_info = root.find(".//errMsg")
+                if error_info is not None and error_info.text:
+                    self.log_callback(f"⚠️ [KIPRIS] API 에러: {error_info.text}. 키 교체 시도...")
+                    if self._rotate_kipris_key(): continue
+                    return True
+
+                count_tag = root.find(".//totalCount")
+                if count_tag is None: return True
+                    
+                count = int(count_tag.text)
+                if count > 0:
+                    self.log_callback(f"   ❌ [KIPRIS] 상표권 발견! '{brand}' ({count}건)")
+                    return False
+                return True 
+
+            except Exception as e:
+                self.log_callback(f"⚠️ [KIPRIS] 조회 실패({e}). 재시도...")
+                if self._rotate_kipris_key(): continue
+                return True 
+        return True
+
+    # ==========================
+    # 메인 비즈니스 로직
+    # ==========================
+    def analyze_category_with_ai(self, product_title):
+        prompt = (
+            f"Role: E-commerce Category Classifier\n"
+            f"Task: Classify the product '{product_title}' into a Korean e-commerce category path (Coupang/Naver style).\n"
+            f"Format: BigCategory > MiddleCategory > SmallCategory\n"
+            f"Constraints:\n"
+            f"1. Output ONLY the path string.\n"
+            f"2. Do NOT write explanations like 'Here is the category'.\n"
+            f"3. Do NOT use Markdown.\n"
+            f"Input: {product_title}\n"
+            f"Output:"
+        )
+        path_hint = self._call_gemini_with_retry(prompt, "개별 카테고리 분석")
+        if path_hint:
+            lines = path_hint.split('\n')
+            for line in lines:
+                if '>' in line: return line.strip()
+            return lines[0].strip()
+        return ""
+    
+    # [수정] 인자에 detail_text 추가 및 프롬프트에 반영
+    def extract_full_info(self, p_name, detail_text=""):
+        prompt = (
+            f"Role: Product Data Extractor\n"
+            f"Input Title: '{p_name}'\n"
+            f"Input Detail Context (Truncated): '{detail_text[:2000]}'\n\n"
+            f"Task: Extract detailed info using BOTH Title and Context. Then translate Title to Korean.\n"
+            f"Rules:\n"
+            f"1. validity: 'false' if menu/nav/login page.\n"
+            f"2. brand/manufacturer: Extract from Context if possible. Output 'NULL' if unknown.\n"
+            f"3. productTitle: Natural Korean translation for e-commerce.\n"
+            f"4. keywords: 5 Korean tags.\n"
+            f"Output JSON: {{ \"is_valid\": true, \"productTitle\": \"...\", \"manufacturer\": \"...\", \"brand\": \"...\", \"model\": \"...\", \"keywords\": [] }}"
+        )
+        res = self._call_gemini_with_retry(prompt, "정보추출")
+        if res:
+            try:
+                clean_json = res.replace('```json', '').replace('```', '').strip()
+                if not clean_json.startswith('{'):
+                    start = clean_json.find('{'); end = clean_json.rfind('}') + 1
+                    if start != -1 and end != -1: clean_json = clean_json[start:end]
+                
+                data = json.loads(clean_json)
+                if not data.get('is_valid', True): 
+                    self.log_callback(f"   🗑️ 유효하지 않음: {p_name[:10]}...")
+                    return None
+                return data
+            except: return None
+        return None
+
+    def detect_and_translate(self, url, keyword):
+        try:
+            target_lang = None
+            if any(site in url for site in ['taobao', 'tmall', '1688']): target_lang = "Simplified Chinese"
+            elif any(site in url for site in ['rakuten', 'yahoo']): target_lang = "Japanese"
+            elif any(site in url for site in ['amazon', 'ebay']): target_lang = "English"
+
+            if target_lang:
+                trans_prompt = (
+                    f"Role: Professional Translator\n"
+                    f"Task: Translate shopping keyword '{keyword}' into {target_lang}.\n"
+                    f"Constraint: Output ONLY the translated word. No explanations. No symbols. No Markdown.\n"
+                    f"Input: {keyword}\n"
+                    f"Output:"
+                )
+                translated = self._call_gemini_with_retry(trans_prompt, "번역")
+                if translated: 
+                    translated = translated.replace('"', '').replace("'", "").replace(".", "").strip()
+                    self.log_callback(f"   ㄴ 번역: '{keyword}' -> '{translated}'")
+                    return translated
+            return keyword
+        except: return keyword
+
     def run(self):
         keywords = [k.strip() for k in self.config['TARGET_ITEMS'].split(",") if k.strip()]
         urls = [u.strip() for u in self.config['SHOP_URLS'].split(",") if u.strip()]
         max_count = int(self.config.get('ITEM_COUNT', 10))
         
-        driver = self.init_driver()
+        self.browser.start_driver()
         try:
             for kw in keywords:
                 if not self.is_running: break
                 self.log_callback(f"\n=== 🏁 키워드 작업 시작: {kw} ===")
                 
-                # 1. 여기서 카테고리를 고정합니다 (Master Category)
-                fixed_cp_cat, fixed_nv_cat = self.determine_master_category(kw)
-                
                 for shop_url in urls:
                     if not self.is_running: break
                     try:
-                        driver.get(shop_url)
-                        time.sleep(3)
-                        t_kw = self.detect_and_translate(shop_url, driver.page_source, kw)
-                        product_list = self.get_shopping_products(driver, shop_url, t_kw, max_count)
-                        
-                        self.log_callback(f"📊 [Info] 총 {len(product_list)}개 상품 분석 시작...")
+                        t_kw = self.detect_and_translate(shop_url, kw)
+                        if len(t_kw) > 50: t_kw = kw 
+
+                        product_list = self.browser.search_and_collect(shop_url, t_kw, max_count, lambda: self.is_running)
+                        self.log_callback(f"📊 [Info] {len(product_list)}개 상품 상세 분석 시작...")
                         
                         for i, (p_name, p_url) in enumerate(product_list):
                             if not self.is_running: break
-                            self.log_callback(f"🔎 [{i+1}/{len(product_list)}] 상세 분석 중...")
+                            self.log_callback(f"🔎 [{i+1}/{len(product_list)}] 상세 페이지 이동 및 분석...")
                             
-                            info = self.extract_full_info(p_name)
-                            time.sleep(5)
+                            # [추가됨] 상세 페이지 내용 긁어오기
+                            detail_text = self.browser.visit_and_get_text(p_url)
+                            
+                            # [수정됨] detail_text를 함께 전달
+                            info = self.extract_full_info(p_name, detail_text)
+                            time.sleep(2) 
                             
                             if info:
                                 if self.check_trademark(info['brand']):
+                                    cat_hint = self.analyze_category_with_ai(info['productTitle'])
+                                    time.sleep(1)
                                     
-                                    # [중요] 개별 상품 카테고리(hint)를 무시하고, 고정된 카테고리를 사용
-                                    self.append_to_excel({
-                                        'cp_cat': fixed_cp_cat, # 고정값 사용
-                                        'nv_cat': fixed_nv_cat, # 고정값 사용
-                                        'title': info['productTitle'], 
-                                        'tags': info['keywords'],
-                                        'url': p_url,
-                                        'manufacturer': info['manufacturer'],
+                                    best_cp = self.excel.find_best_category(cat_hint, 'coupang')
+                                    best_nv = self.excel.find_best_category(cat_hint, 'naver')
+                                    self.log_callback(f"   ㄴ 카테고리: {best_cp[:10]}... / {best_nv[:10]}...")
+                                    
+                                    self.excel.save_product({
+                                        'cp_cat': best_cp, 'nv_cat': best_nv,
+                                        'title': info['productTitle'], 'tags': info['keywords'],
+                                        'url': p_url, 'manufacturer': info['manufacturer'],
                                         'brand': info['brand'], 'model': info['model']
                                     })
                             time.sleep(1)
+
+                    except WebDriverException:
+                        self.log_callback("🚨 브라우저 오류. 재시작...")
+                        self.browser.close(); self.browser.start_driver()
                     except Exception as e:
                         self.log_callback(f"⚠️ [Loop Error] {e}")
-                        try: driver.quit(); self.proc.kill()
-                        except: pass
-                        driver = self.init_driver()
         finally:
-            try: driver.quit(); self.proc.kill()
-            except: pass
+            self.browser.close()
             self.log_callback("\n🏁 [Finish] 작업 종료")
 
     def stop(self):
