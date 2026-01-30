@@ -55,7 +55,7 @@ class StringListEditor(ctk.CTkFrame):
             item_card.grid(row=idx, column=0, sticky="ew", padx=0, pady=3)
             item_card.grid_columnconfigure(0, weight=1)
 
-            # 항목 텍스트 (맑은 고딕, 15pt)
+            # 항목 텍스트
             lbl = ctk.CTkLabel(
                 item_card, text=item_text, 
                 font=("Malgun Gothic", 15), 
@@ -98,12 +98,40 @@ class ConfigWindow(ctk.CTkToplevel):
         self.cm = config_manager
         self.save_callback = save_callback
         
+        # 메인 컨테이너
         self.main_frame = ctk.CTkFrame(self, fg_color="transparent")
         self.main_frame.pack(fill="both", expand=True, padx=20, pady=20)
         
-        self.lbl_title = ctk.CTkLabel(self.main_frame, text="⚙️ 환경 설정", font=("Malgun Gothic", 24, "bold"))
-        self.lbl_title.pack(pady=(0, 15))
+        # ==========================================================
+        # [수정됨] 헤더 영역 (제목 + 저장 버튼)
+        # ==========================================================
+        self.header_frame = ctk.CTkFrame(self.main_frame, fg_color="transparent")
+        self.header_frame.pack(fill="x", pady=(0, 15))
+
+        # 제목 (왼쪽 정렬)
+        self.lbl_title = ctk.CTkLabel(
+            self.header_frame, 
+            text="⚙️ 환경 설정", 
+            font=("Malgun Gothic", 24, "bold")
+        )
+        self.lbl_title.pack(side="left")
+
+        # 저장 버튼 (오른쪽 정렬 - 상단으로 이동)
+        self.btn_save = ctk.CTkButton(
+            self.header_frame, 
+            text="💾 저장 및 닫기", 
+            font=("Malgun Gothic", 14, "bold"), 
+            height=35,
+            width=120,
+            fg_color="#3B8ED0", 
+            hover_color="#36719F",
+            command=self.save_config
+        )
+        self.btn_save.pack(side="right")
         
+        # ==========================================================
+        # 스크롤 가능한 메인 영역
+        # ==========================================================
         self.scrollable_frame = ctk.CTkScrollableFrame(self.main_frame, width=580, height=600)
         self.scrollable_frame.pack(fill="both", expand=True)
 
@@ -144,13 +172,7 @@ class ConfigWindow(ctk.CTkToplevel):
         self.entry_excel.pack(pady=(5, 20), anchor="w", padx=5)
         self.entry_excel.insert(0, self.cm.get_val("EXCEL_FILE"))
 
-        self.btn_save = ctk.CTkButton(
-            self.main_frame, text="설정 저장 및 닫기", 
-            font=("Malgun Gothic", 18, "bold"), height=55,
-            fg_color="#3B8ED0", hover_color="#36719F",
-            command=self.save_config
-        )
-        self.btn_save.pack(fill="x", pady=10)
+        # (하단에 있던 저장 버튼 코드는 삭제됨)
 
     def _create_label(self, text):
         label = ctk.CTkLabel(self.scrollable_frame, text=text, font=("Malgun Gothic", 16, "bold"), text_color="#3B8ED0")

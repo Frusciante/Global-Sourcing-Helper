@@ -2,7 +2,7 @@ import time
 import json
 import requests
 import xml.etree.ElementTree as ET
-import google.generativeai as genai 
+import google.genai as genai 
 from selenium.common.exceptions import WebDriverException
 from tkinter import messagebox # [필수] 에러 팝업용 추가
 
@@ -15,7 +15,6 @@ class SourcingProcessor:
         self.config = config
         self.log_callback = log_callback
         self.is_running = True
-        self.attempt_count = 0
         
         # 1. 엑셀 핸들러
         excel_file = self.config.get('EXCEL_FILE', 'windly-excel-bulk-upload-ver9.xlsx')
@@ -39,8 +38,10 @@ class SourcingProcessor:
             "gemini-2.5-flash",      
             "gemini-2.5-flash-lite" 
         ]
+
         self.current_model_idx = 0
-        self.model = None 
+        
+        self.client = None  # [변경] model 객체 대신 client 객체 사용
 
         try:
             self._configure_genai()
@@ -63,18 +64,19 @@ class SourcingProcessor:
     # ==========================
     # AI 관련 로직 (Gemini)
     # ==========================
-    # [수정 1] 설정 실패 시 self.model을 확실하게 None으로 초기화
     def _configure_genai(self):
         if not self.api_keys: return
         current_key = self.api_keys[self.current_key_idx]
         try:
-            genai.configure(api_key=current_key)
+            # [변경] 신버전 SDK: Client 인스턴스 생성
+            self.client = genai.Client(api_key=current_key)
+            
             model_name = self.model_candidates[self.current_model_idx]
-            self.log_callback(f"🔑 [AI] 키 설정 ({self.current_key_idx + 1}/{len(self.api_keys)}) | 모델: {model_name}")
-            self.model = genai.GenerativeModel(model_name)
+            self.log_callback(f"🔑 [AI] 키 설정 ({self.current_key_idx + 1}/{len(self.api_keys)}) | 타겟 모델: {model_name}")
+            
         except Exception as e:
             self.log_callback(f"❌ [AI] 설정 오류: {e}")
-            self.model = None # [중요] 실패하면 None으로 만들어서 억지로 실행되는 것 방지
+            self.client = None
 
     def _rotate_api_key(self):
         """Gemini 키 교체 (공통 함수 사용)"""
@@ -82,74 +84,70 @@ class SourcingProcessor:
         if success:
             self._configure_genai() # Gemini는 재설정이 필요함
         return success
-
+    
     def _switch_model(self):
+        """모델 인덱스만 변경 (Client는 그대로 사용)"""
         if len(self.model_candidates) <= 1: return False
         
         self.current_model_idx = (self.current_model_idx + 1) % len(self.model_candidates)
         new_model_name = self.model_candidates[self.current_model_idx]
         
-        self.log_callback(f"⚠️ [AI] 모델 한도 초과 예상 -> '{new_model_name}'(으)로 모델 변경 시도!")
-        try:
-            self.model = genai.GenerativeModel(new_model_name)
-            return True
-        except Exception as e:
-            self.log_callback(f"❌ [AI] 모델 변경 실패: {e}")
-            return False
+        self.log_callback(f"⚠️ [AI] 모델 한도 초과 예상 -> '{new_model_name}'(으)로 타겟 변경")
+        return True
 
     def _call_gemini_with_retry(self, prompt, context=""):
-        # 총 시도 가능 횟수 = (키 개수) * (모델 개수)
         total_combinations = len(self.api_keys) * len(self.model_candidates)
         if total_combinations == 0: total_combinations = 1
         
-        while self.attempt_count < total_combinations:
-            try:
-                # 1. 모델 객체 확인 및 복구
-                if not self.model: self._configure_genai()
-                if not self.model: raise Exception("모델 객체 생성 실패")
+        attempt_count = 0 
 
-                # 2. 실행
-                response = self.model.generate_content(prompt)
+        while attempt_count < total_combinations:
+            try:
+                # 1. Client 객체 확인 및 복구
+                if not self.client: self._configure_genai()
+                if not self.client: raise Exception("AI Client 객체 생성 실패")
+
+                # 2. 실행 (신버전 문법)
+                # client.models.generate_content(model='모델명', contents='프롬프트')
+                current_model = self.model_candidates[self.current_model_idx]
+                
+                response = self.client.models.generate_content(
+                    model=current_model,
+                    contents=prompt
+                )
                 
                 if response and response.text: 
                     return response.text.replace('```json', '').replace('```', '').strip()
 
             except Exception as e:
                 error_msg = str(e).lower()
-                self.attempt_count += 1 # 실패 횟수 증가
+                attempt_count += 1 
                 
                 # 3. 에러 핸들링
                 if "429" in error_msg or "quota" in error_msg or "resource" in error_msg or "model" in error_msg or "404" in error_msg:
-                    # [수정] 로그에 context 추가 (예: "번역", "카테고리 분석")
-                    self.log_callback(f"⏳ [AI] {context} 중 Gemini API 사용량 초과. ({self.attempt_count}/{total_combinations}). 다음 수단 찾는 중...")
-                    
+                    self.log_callback(f"⏳ [AI] {context} 중 오류, AI API 키를 재설정합니다. ({attempt_count}/{total_combinations})...")
                     key_rotated = self._rotate_api_key()
                     
+                    # 키가 한 바퀴 돌았으면 모델 변경
                     if (self.current_key_idx == 0) or (not key_rotated):
-                        self.log_callback(f"⚠️ [AI] ({context}) 현재 모델의 모든 키 소진. 모델 변경 시도.")
-                        if not self._switch_model():
-                            pass 
+                        self.log_callback(f"⚠️ [AI] ({context}) 키 소진. 모델 변경.")
+                        self._switch_model()
                     
                     time.sleep(1)
                     continue
                 
                 else:
-                    # [수정] 알 수 없는 오류에도 context 표시
                     self.log_callback(f"⚠️ [AI] {context} 실패: {error_msg}")
                     time.sleep(1)
                     continue
 
         # [최후의 수단]
-        self.log_callback(f"❌ [Critical] '{context}' 작업 중 모든 API 키와 모델 한도 초과.")
+        self.log_callback(f"❌ [Critical] '{context}' 작업 중 모든 수단 실패.")
         self.stop()
         
         messagebox.showerror(
             "AI 한도 초과 (비상 정지)", 
-            f"'{context}' 작업을 수행하려 했으나,\n모든 API 키와 모델을 사용해도 실패했습니다.\n\n"
-            "1. 인터넷 연결 확인\n"
-            "2. 내일 다시 시도 (오후 5시 초기화)\n"
-            "3. 새 API 키 추가\n\n"
-            "프로그램을 종료합니다."
+            f"'{context}' 작업 실패.\n모든 키/모델을 사용했으나 응답이 없습니다.\n프로그램을 종료합니다."
         )
         return None
 
