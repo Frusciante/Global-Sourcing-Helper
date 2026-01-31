@@ -62,8 +62,6 @@ class BrowserManager:
             "--profile-directory=Default",
             "--no-first-run", 
             "--remote-allow-origins=*",
-            "--disable-blink-features=AutomationControlled", # 자동화 제어 플래그 숨김 (필수)
-            "--disable-infobars",
             "--disable-extensions",
             # User-Agent 변경 옵션 제거 -> 원래 크롬 정보 그대로 사용
             f"--window-size={win_w},{win_h}", 
