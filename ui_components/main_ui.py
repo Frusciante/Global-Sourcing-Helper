@@ -5,6 +5,7 @@ import tkinter as tk # 필요한 경우를 대비해 import
 # 모듈 임포트
 from ui_components.config_window import ConfigWindow
 from logic.processor import SourcingProcessor
+import datetime
 
 class MainUI(ctk.CTk):
     def __init__(self, config_manager):
@@ -80,9 +81,17 @@ class MainUI(ctk.CTk):
         self.log(f"   - 타겟 키워드: {self.cm.get_val('TARGET_ITEMS')}")
 
     def log(self, message):
-        """로그 박스에 메시지 출력"""
+        """로그 박스에 메시지 출력 (시간 정보 자동 추가)"""
         self.log_box.configure(state="normal")
-        self.log_box.insert("end", message + "\n")
+        
+        # [수정] 현재 시간 구하기 (시:분:초)
+        current_time = datetime.datetime.now().strftime("[%H:%M:%S]")
+        
+        # [수정] 시간 + 메시지 합치기
+        formatted_msg = f"{current_time} {message}"
+        
+        # 변경된 메시지를 출력
+        self.log_box.insert("end", formatted_msg + "\n")
         self.log_box.see("end") 
         self.log_box.configure(state="disabled")
 

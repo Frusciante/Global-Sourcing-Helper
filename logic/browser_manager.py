@@ -2,7 +2,8 @@ import os
 import time
 import shutil
 import subprocess
-from tkinter import messagebox # [추가] 팝업창용
+import random
+from tkinter import messagebox
 
 from selenium import webdriver
 from selenium.webdriver.chrome.service import Service
@@ -11,18 +12,21 @@ from selenium.webdriver.common.by import By
 from selenium.webdriver.common.keys import Keys
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
-from selenium.common.exceptions import WebDriverException
+from selenium.common.exceptions import WebDriverException, StaleElementReferenceException, TimeoutException
+from selenium.webdriver.common.action_chains import ActionChains
 from webdriver_manager.chrome import ChromeDriverManager
-import random # 상단 추가
 
 class BrowserManager:
     def __init__(self, log_callback):
         self.log_callback = log_callback
         self.driver = None
         self.proc = None 
+        self.checked_sites = set() # [추가] 로그인 확인을 완료한 사이트 목록
 
     def start_driver(self):
-        """Selenium 탐지 회피 옵션을 적용한 크롬 실행"""
+        """
+        Selenium 실행 (기존 프로필/하드웨어 정보 유지 + 창 크기/리퍼러만 자연스럽게 변경)
+        """
         try:
             subprocess.run("taskkill /F /IM chrome.exe /T", shell=True, stderr=subprocess.DEVNULL)
             time.sleep(1)
@@ -30,8 +34,15 @@ class BrowserManager:
 
         current_folder = os.getcwd()
         bot_profile_path = os.path.join(current_folder, "bot_profile")
-        
-        # ... (프로필 복사 로직은 그대로 유지) ...
+        real_user_data = os.path.join(os.environ['LOCALAPPDATA'], 'Google', 'Chrome', 'User Data')
+
+        # 프로필이 없으면 복사 (최초 1회만)
+        if not os.path.exists(bot_profile_path):
+            self.log_callback("♻️ [Init] 프로필 복제 중... (최초 1회)")
+            try:
+                shutil.copytree(real_user_data, bot_profile_path, 
+                                ignore=shutil.ignore_patterns('*.lock', 'Singleton*', '*.tmp', 'Cache*', 'Code Cache*'))
+            except: pass
 
         chrome_exe_path = r"C:\Program Files\Google\Chrome\Application\chrome.exe"
         if not os.path.exists(chrome_exe_path): 
@@ -39,7 +50,11 @@ class BrowserManager:
         
         debug_port = 9222
         
-        # [중요 1] 자동화 제어 메시지를 끄는 옵션 추가
+        # [은신 1] 창 크기 랜덤화 (User-Agent나 하드웨어 정보는 건드리지 않음)
+        # 매번 조금씩 다른 크기로 브라우저를 띄워 '기계적인 느낌'만 제거
+        win_w = random.randint(1200, 1600)
+        win_h = random.randint(800, 1000)
+
         cmd = [
             chrome_exe_path,
             f"--remote-debugging-port={debug_port}",
@@ -47,10 +62,12 @@ class BrowserManager:
             "--profile-directory=Default",
             "--no-first-run", 
             "--remote-allow-origins=*",
-            # 아래 옵션들이 추가되어야 함
-            "--disable-blink-features=AutomationControlled", # 자동화 제어 감지 방지
-            "--disable-infobars", # 상단 '자동화된...' 바 숨김
-            "--disable-extensions" 
+            "--disable-blink-features=AutomationControlled", # 자동화 제어 플래그 숨김 (필수)
+            "--disable-infobars",
+            "--disable-extensions",
+            # User-Agent 변경 옵션 제거 -> 원래 크롬 정보 그대로 사용
+            f"--window-size={win_w},{win_h}", 
+            "--lang=ko_KR" 
         ]
         
         self.log_callback(f"🚀 [Init] 크롬 프로세스 시작 (Stealth Mode)")
@@ -64,8 +81,7 @@ class BrowserManager:
             service = Service(ChromeDriverManager().install())
             self.driver = webdriver.Chrome(service=service, options=chrome_options)
 
-            # [중요 2] 브라우저 내부 자바스크립트 변수 조작 (가장 중요)
-            # 타오바오가 'navigator.webdriver'를 조회했을 때 'false'를 반환하게 속임
+            # [필수] CDP 명령어로 navigator.webdriver 속성 숨김
             self.driver.execute_cdp_cmd("Page.addScriptToEvaluateOnNewDocument", {
                 "source": """
                     Object.defineProperty(navigator, 'webdriver', {
@@ -73,61 +89,102 @@ class BrowserManager:
                     });
                 """
             })
+
+            # [은신 2] 구글을 거쳐서 들어온 척하기 (Referer 조작 효과)
+            # 타겟 사이트 접속 전에 구글을 한 번 띄워줌
+            try:
+                self.driver.get("https://www.google.com")
+                time.sleep(1.5) # 구글이 로딩될 때까지 잠깐 대기
+            except: pass
             
-            self.log_callback("✅ [Init] Selenium 연결 성공 (탐지 우회 적용)")
+            self.log_callback("✅ [Init] Selenium 연결 성공")
             return self.driver
         except Exception as e:
             self.log_callback(f"❌ [Init] 연결 실패: {e}")
             raise e
 
     def get_page_source(self):
-        if self.driver:
-            return self.driver.page_source
+        if self.driver: return self.driver.page_source
         return ""
 
-    def search_and_collect(self, url, keyword, count, is_running_check):
-        """키워드 검색 및 상품 목록 수집 (새 탭 전환 기능 추가)"""
+    def search_and_collect(self, url, keyword, count, is_running_check, process_callback=None):
+        """
+        [수정됨] 타오바오/1688 접속 시 무조건 팝업 띄워서 로그인 확인 (URL 감지 방식 제거)
+        """
         driver = self.driver
-        if not driver: return []
+        if not driver: return 0
 
-        products = []
+        collected_count = 0
         page_num = 1
         is_first_load = True 
+        processed_links = set()
+
+        next_buttons_xpath = [
+            "//a[contains(@class, 's-pagination-next')]", 
+            "//button[contains(@class, 'next-next')]",
+            "//button[span[contains(text(), '下一页')]]",
+            "//a[contains(text(), '下一页')]", "//span[contains(text(), '下一页')]", 
+            "//button[contains(text(), '下一页')]", "//a[contains(text(), '下页')]",
+            "//a[contains(text(), 'Next')]", "//a[contains(text(), 'next')]", 
+            "//a[contains(text(), '다음')]", "//a[contains(text(), '>')]", 
+            "//a[contains(@class, 'next')]", "//li[contains(@class, 'next')]/a", 
+            "//button[contains(@class, 'next')]",
+            "//a[contains(text(), '次へ')]", "//a[contains(text(), '次のページ')]"
+        ]
 
         while is_running_check():
             try:
-                # --- [A] 검색 단계 (1페이지일 때만) ---
-                if page_num == 1:
-                    if is_first_load:
-                        self.log_callback(f"🔍 [Search] '{keyword}' 검색 시작...")
-                        driver.get(url)
-                        time.sleep(3)
-                        is_first_load = False
+                found_on_page = 0 
 
-                    # 1. 검색 전 현재 탭 개수 기억 (비교용)
+                # --- [A] 검색 단계 (1페이지, 최초 1회) ---
+                if page_num == 1 and is_first_load:
+                    self.log_callback(f"🔍 [Search] '{keyword}' 검색 시작...")
+                    driver.get(url)
+                    time.sleep(3)
+                    
+                    # -----------------------------------------------------------
+                    # 🔥 [수정됨] URL 자동 감지 로직 제거 -> 무조건 물어보기 (사이트별 1회)
+                    # -----------------------------------------------------------
+                    # 타오바오, 1688, 티몰 등 중국 사이트인지 확인
+                    is_login_target = any(site in url for site in ['taobao', '1688', 'tmall'])
+                    
+                    # 해당 사이트이고, 아직 확인하지 않았다면 팝업 띄움
+                    if is_login_target and (url not in self.checked_sites):
+                        self.log_callback("👮 [Login Check] 사용자에게 로그인 확인을 요청합니다.")
+                        
+                        # [확인]을 누를 때까지 여기서 대기함
+                        is_ok = messagebox.askokcancel(
+                            "로그인 상태 확인",
+                            f"타오바오/1688 등에 접속했습니다.\n\n"
+                            f"1. 브라우저에서 로그인이 잘 되어 있는지 확인해주세요.\n"
+                            f"   (로그인이 안 되어 있다면 지금 직접 로그인해주세요.)\n\n"
+                            f"2. 로그인이 완료되었다면 [확인]을 눌러주세요.\n\n"
+                            f"([취소]를 누르면 이 작업을 건너뜁니다.)"
+                        )
+                        
+                        if is_ok:
+                            self.checked_sites.add(url) # 확인 완료 목록에 추가
+                            self.log_callback("✅ 사용자가 로그인을 확인했습니다. 검색을 시작합니다...")
+                        else:
+                            self.log_callback("🚫 사용자가 작업을 취소했습니다.")
+                            return collected_count # 작업 중단
+                    
+                    is_first_load = False
+
+                    # (이하 검색창 입력 로직 - 기존과 동일)
                     old_window_handles = driver.window_handles
-
-                    # 2. 검색창 찾기 및 입력
                     search_input = None
-                    search_selectors = [
-                        "input#twotabsearchtextbox", "input#q", "input[name='q']", 
-                        "input[type='search']", "input[name='keyword']", "input[id*='search']",
-                        "input#home-header-searchbox", "input#common-header-search-input"
-                    ]
+                    search_selectors = ["input#twotabsearchtextbox", "input#q", "input[name='q']", "input[type='search']", "input[name='keyword']", "input[id*='search']", "input#home-header-searchbox", "input#common-header-search-input"]
 
                     for sel in search_selectors:
                         try:
-                            search_input = WebDriverWait(driver, 1).until(
-                                EC.element_to_be_clickable((By.CSS_SELECTOR, sel))
-                            )
+                            search_input = WebDriverWait(driver, 1).until(EC.element_to_be_clickable((By.CSS_SELECTOR, sel)))
                             if search_input: break
                         except: continue
 
                     if search_input:
                         try:
-                            current_val = search_input.get_attribute("value")
-                            # 검색어가 비어있거나 다르면 입력 수행
-                            if current_val != keyword:
+                            if search_input.get_attribute("value") != keyword:
                                 search_input.click()
                                 time.sleep(0.5)
                                 search_input.clear()
@@ -138,154 +195,183 @@ class BrowserManager:
                                 search_input.send_keys(Keys.ENTER)
                                 time.sleep(3)
                                 
-                                # [핵심 추가] 검색 후 탭이 늘어났는지 확인하여 시선 이동
                                 new_window_handles = driver.window_handles
                                 if len(new_window_handles) > len(old_window_handles):
-                                    self.log_callback("🔀 새 탭이 감지되었습니다. 시선을 이동합니다.")
-                                    # 가장 마지막에 열린 탭(새 탭)으로 전환
                                     driver.switch_to.window(new_window_handles[-1])
-                                    time.sleep(2) # 페이지 로딩 대기
-                                else:
-                                    # 탭이 안 늘어났어도, 혹시 URL이 바뀌었는지 확인
-                                    pass
-
+                                    time.sleep(2)
                         except: pass
-                    
-                # --- [B] 상품 수집 단계 ---
-                # (이 시점에서 driver는 이미 결과 페이지 탭을 보고 있습니다)
-                self.log_callback(f"📄 [Page {page_num}] 상품 스캔 중... (현재 {len(products)}/{count}개)")
-                self._scroll_smoothly()
 
-                selectors = ["[class*='title--']", "[class*='Title--']", "div.title", "div.item-name", "a[id*='item-title']", "h1", "h2", "h3", "span.a-text-normal"]
-                current_page_products = [] 
+                # --- [B] 실시간 스크롤 및 수집 루프 ---
+                self.log_callback(f"📄 [Page {page_num}] 탐색 중... (현재 {collected_count}/{count}개)")
+                
+                last_scroll_y = driver.execute_script("return window.scrollY")
+                same_scroll_count = 0
+                next_page_clicked = False 
 
-                # 요소 찾기 시작
-                for selector in selectors:
-                    elements = driver.find_elements(By.CSS_SELECTOR, selector)
-                    if not elements: continue
+                while True:
+                    if not is_running_check() or collected_count >= count: break
                     
-                    valid_elements = [el for el in elements if len(el.text.strip()) > 5]
+                    # 1. 상품 스캔
+                    selectors = ["[class*='title--']", "[class*='Title--']", "div.title", "div.item-name", "a[id*='item-title']", "h1", "h2", "h3", "span.a-text-normal"]
+                    found_target = None
                     
-                    for el in valid_elements:
-                        if not is_running_check(): return products
-                        if len(products) >= count: break 
+                    for selector in selectors:
+                        elements = driver.find_elements(By.CSS_SELECTOR, selector)
+                        candidates = [el for el in elements if len(el.text.strip()) > 5]
+                        for el in candidates:
+                            try:
+                                if el.tag_name == 'a': link = el.get_attribute('href')
+                                else: link = el.find_element(By.XPATH, "./ancestor::a").get_attribute('href')
+                                
+                                if not link or link in processed_links: continue
+                                found_target = (el, link)
+                                break
+                            except: continue
+                        if found_target: break
+                    
+                    if found_target:
+                        target_el, target_link = found_target
+                        processed_links.add(target_link)
+                        found_on_page += 1 
+                        
+                        product_name = target_el.text.strip()
+                        self.log_callback(f"   🔎 발견! '{product_name[:15]}...' 진입")
 
+                        # 진입 및 콜백 실행 (기존과 동일)
                         try:
-                            product_name = el.text.strip()
-                            product_link = driver.current_url 
+                            main_window = driver.current_window_handle
+                            old_windows = driver.window_handles
+                            current_list_url = driver.current_url 
                             
-                            if el.tag_name == 'a': product_link = el.get_attribute('href')
+                            self._click_like_human(target_el)
+                            time.sleep(3)
+                            
+                            new_windows = driver.window_handles
+                            success = False
+                            
+                            if len(new_windows) > len(old_windows):
+                                new_tab = [w for w in new_windows if w not in old_windows][-1]
+                                driver.switch_to.window(new_tab)
+                                if process_callback:
+                                    self._scroll_a_bit_in_detail()
+                                    success = process_callback(driver, product_name)
+                                try:
+                                    if len(driver.window_handles) > 1: driver.close()
+                                except: pass
+                                driver.switch_to.window(main_window)
                             else:
-                                try: parent_a = el.find_element(By.XPATH, "./ancestor::a"); product_link = parent_a.get_attribute('href')
-                                except:
-                                    try: child_a = el.find_element(By.TAG_NAME, "a"); product_link = child_a.get_attribute('href')
-                                    except: pass
+                                if driver.current_url != current_list_url:
+                                    if process_callback:
+                                        self._scroll_a_bit_in_detail()
+                                        success = process_callback(driver, product_name)
+                                    driver.back()
+                                    time.sleep(2)
+                                    if driver.current_url != current_list_url:
+                                        driver.get(current_list_url)
+                                        time.sleep(3)
                             
-                            if not product_link or product_link == driver.current_url: continue
-                            if any(p[1] == product_link for p in products): continue
+                            if success:
+                                collected_count += 1
+                                self.log_callback(f"   ✅ 수집 성공 (누적 {collected_count}/{count})")
+                                wait_time = random.uniform(0.8, 3.0)
+                                self.log_callback(f"   ⏳ 다음 상품 탐색 전 대기 ({wait_time:.1f}s)...")
+                                time.sleep(wait_time)
+                            
+                        except Exception as e:
+                            self.log_callback(f"   ⚠️ 처리 중 에러: {e}")
+                            try: driver.switch_to.window(main_window)
+                            except: pass
+                        continue 
 
-                            products.append((product_name, product_link))
-                            current_page_products.append((product_name, product_link))
+                    # 2. 다음 페이지 버튼 감지 (즉시 이동)
+                    found_next_btn = None
+                    for xpath in next_buttons_xpath:
+                        try:
+                            btns = driver.find_elements(By.XPATH, xpath)
+                            for btn in btns:
+                                if btn.is_displayed():
+                                    if btn.get_attribute("disabled") or "disabled" in btn.get_attribute("class"): continue
+                                    found_next_btn = btn
+                                    break
+                            if found_next_btn: break
                         except: continue
                     
-                    if len(products) >= count: break
+                    if found_next_btn:
+                        self.log_callback("   🚀 다음 버튼 발견! 즉시 이동.")
+                        try:
+                            driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", found_next_btn)
+                            self._click_like_human(found_next_btn)
+                            time.sleep(random.uniform(3.5, 6.0))
+                            page_num += 1
+                            next_page_clicked = True
+                            break 
+                        except: pass
 
-                # --- [C] 결과 확인 및 수동 개입 (탭 전환 후에도 못 찾으면 팝업) ---
-                if len(current_page_products) == 0:
-                    self.log_callback(f"⚠️ [Blocked] 상품을 찾을 수 없습니다.")
+                    # -------------------------------------------------------
+                    # 3. [수정됨] 스크롤 다운 (천천히, 사람처럼)
+                    # -------------------------------------------------------
+                    scroll_goal = random.randint(500, 800) # 이번 턴에 내려갈 총 거리
+                    current_moved = 0
                     
+                    while current_moved < scroll_goal:
+                        # [미세 조정] 한 번에 100~250px 씩 부드럽게 이동
+                        step = random.randint(100, 250)
+                        
+                        driver.execute_script(f"window.scrollBy({{top: {step}, behavior: 'smooth'}});")
+                        current_moved += step
+                        
+                        # [속도 조절] 휠 굴리고 시선 두는 시간 (0.8 ~ 1.5초)
+                        time.sleep(random.uniform(0.8, 1.5))
+                        
+                        # [사람 특징] 15% 확률로 역주행 (다시 확인)
+                        if random.random() < 0.15:
+                            reverse = random.randint(50, 150)
+                            driver.execute_script(f"window.scrollBy({{top: -{reverse}, behavior: 'smooth'}});")
+                            time.sleep(random.uniform(0.6, 1.0))
+                            current_moved -= reverse 
+
+                    # -------------------------------------------------------
+                    # 4. 스크롤 멈춤 감지 및 대기 로그
+                    # -------------------------------------------------------
+                    wait_time = random.uniform(1.5, 2.5)
+                    self.log_callback(f"   ⏳ 천천히 스크롤 중... ({wait_time:.1f}s 대기)")
+                    time.sleep(wait_time)
+                    
+                    current_scroll_y = driver.execute_script("return window.scrollY")
+                    
+                    if current_scroll_y == last_scroll_y:
+                        same_scroll_count += 1
+                        if same_scroll_count >= 3:
+                            self.log_callback("   🛑 페이지 끝 도달")
+                            break
+                    else:
+                        same_scroll_count = 0
+                        last_scroll_y = current_scroll_y
+                
+                # --- [C] 결과 확인 (캡차 감지 - 기존 기능 유지) ---
+                if collected_count >= count:
+                    self.log_callback("🎉 목표 수량 달성!")
+                    break
+
+                if found_on_page == 0:
+                    self.log_callback("⚠️ [Warning] 이 페이지에서 상품을 하나도 못 찾았습니다. (캡차/로그인 차단 의심)")
                     is_retry = messagebox.askretrycancel(
-                        "수동 개입 필요",
-                        f"현재 탭에서 상품을 찾을 수 없습니다.\n(현재 URL: {driver.current_url})\n\n"
-                        f"1. 새 탭이 열렸다면 셀레늄이 거기로 이동했을 것입니다.\n"
-                        f"2. 만약 엉뚱한 페이지라면 직접 페이지를 이동해주세요.\n"
-                        f"3. 캡차/로그인이 떴다면 해결해주세요.\n"
-                        f"4. 준비가 되면 [재시도]를 눌러주세요."
+                        "수동 개입 필요 (상품 0개)",
+                        f"현재 페이지에서 상품을 찾을 수 없습니다.\n\n"
+                        f"1. 브라우저에 캡차나 로그인이 떴는지 확인하세요.\n"
+                        f"2. 문제를 해결했다면 [재시도]를 눌러주세요."
                     )
-                    
                     if is_retry:
-                        self.log_callback("🔄 재시도: 현재 활성화된 탭에서 다시 스캔합니다.")
-                        # 사용자가 탭을 바꿨을 수도 있으니, 현재 보고 있는 탭 유지
+                        self.log_callback("🔄 재시도: 현재 페이지 다시 스캔...")
                         continue 
                     else:
                         break
 
-                self.log_callback(f"   ㄴ {len(current_page_products)}개 신규 수집 완료.")
+                if next_page_clicked:
+                    continue 
 
-                if len(products) >= count:
-                    self.log_callback("✅ 목표 수량 달성!")
-                    break
-                
-                wait_time = random.uniform(3.5, 6.5)
-                self.log_callback(f"   ⏳ {wait_time:.1f}초 대기 (사람처럼 고민 중)...")
-                time.sleep(wait_time)
-                
-                # --- [D] 다음 페이지 이동 ---
-                self.log_callback("   ⏩ 다음 페이지를 찾습니다...")
-                
-                next_btn = None
-                next_buttons_xpath = [
-                    # 1. [타오바오/티몰] 전용 (보내주신 HTML 기반)
-                    # 클래스에 'next-next'가 포함된 버튼 (가장 정확함)
-                    "//button[contains(@class, 'next-next')]",
-                    # 버튼 내부에 '下一页' 텍스트를 가진 span이 있는 경우
-                    "//button[span[contains(text(), '下一页')]]",
-                    
-                    # 2. [일반적인 중국어 사이트]
-                    "//a[contains(text(), '下一页')]", 
-                    "//span[contains(text(), '下一页')]", 
-                    "//button[contains(text(), '下一页')]",
-                    "//a[contains(text(), '下页')]",
-
-                    # 3. [영어/한국어/기호]
-                    "//a[contains(text(), 'Next')]", 
-                    "//a[contains(text(), 'next')]", 
-                    "//a[contains(text(), '다음')]", 
-                    "//a[contains(text(), '>')]", 
-                    "//a[contains(@class, 'next')]", 
-                    "//li[contains(@class, 'next')]/a", 
-                    "//a[contains(@class, 's-pagination-next')]", 
-                    "//button[contains(@class, 'next')]",
-
-                    # 4. [일본어]
-                    "//a[contains(text(), '次へ')]", 
-                    "//a[contains(text(), '次のページ')]", 
-                    "//a[contains(@class, 'nextPage')]"     
-                ]
-
-                for xpath in next_buttons_xpath:
-                    try:
-                        btn = driver.find_element(By.XPATH, xpath)
-                        # 버튼이 화면에 보이고(is_displayed), 활성화(is_enabled) 상태인지 확인
-                        # 타오바오는 마지막 페이지에서 버튼이 disabled 처리될 수 있음
-                        if btn and btn.is_displayed():
-                            # disabled 속성이 있는지 체크 (마지막 페이지인지 확인)
-                            if btn.get_attribute("disabled") or "disabled" in btn.get_attribute("class"):
-                                continue
-                                
-                            next_btn = btn
-                            break
-                    except: continue
-                
-                if next_btn:
-                    try:
-                        # [중요] 타오바오는 하단 바가 버튼을 가리는 경우가 많으므로 JS로 스크롤 및 클릭 강제 실행
-                        driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", next_btn)
-                        time.sleep(1)
-                        driver.execute_script("arguments[0].click();", next_btn)
-                        
-                        self.log_callback(f"   ➡️ 다음 페이지({page_num + 1})로 이동합니다.")
-                        
-                        load_wait = random.uniform(3.3, 6.1)
-                        time.sleep(load_wait)
-
-                        page_num += 1
-                    except Exception as e:
-                        self.log_callback(f"   ⚠️ 다음 페이지 버튼 클릭 실패: {e}")
-                        break
-                else:
-                    self.log_callback("   🛑 더 이상 '다음 페이지' 버튼이 없습니다.")
-                    break
+                self.log_callback("   🛑 다음 페이지 버튼 부재로 종료.")
+                break
 
             except Exception as e:
                 self.log_callback(f"⚠️ 에러 발생: {e}")
@@ -293,35 +379,66 @@ class BrowserManager:
                 if is_retry: continue
                 else: break
 
-        return products[:count]
+        return collected_count
 
-    def _scroll_smoothly(self):
-        """페이지를 부드럽게 끝까지 내림 (Lazy Loading 대응)"""
+    def _scroll_a_bit_in_detail(self):
+        """상세 페이지에서 사람처럼 불규칙하게 스크롤 (속도/깊이 랜덤 변형)"""
         try:
-            last_height = self.driver.execute_script("return document.body.scrollHeight")
-            for _ in range(3): # 3번 정도 나눠서 내림
-                self.driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
-                time.sleep(1.5)
-                new_height = self.driver.execute_script("return document.body.scrollHeight")
-                if new_height == last_height: break
-                last_height = new_height
-            # 다시 맨 위로 (다음 버튼이 위에 있을 수도 있고, 요소 찾기 안정성 위해)
-            # self.driver.execute_script("window.scrollTo(0, 0);") 
+            # 1. 최종적으로 내려갈 깊이 설정 (400px ~ 1500px 사이 랜덤)
+            # 기존보다 범위를 넓혀서 어떤 상품은 많이 보고, 어떤 건 조금만 보게 함
+            target_depth = random.randint(400, 1500)
+            current_y = 0
+            
+            # 2. 목표 지점까지 한 번에 가지 않고, 조금씩 끊어서 이동
+            while current_y < target_depth:
+                # 한 번에 휠을 굴리는 거리 (100px ~ 350px)
+                step = random.randint(100, 350)
+                current_y += step
+                
+                # 스크롤 실행 (smooth 옵션으로 부드럽게)
+                self.driver.execute_script(f"window.scrollTo({{top: {current_y}, behavior: 'smooth'}});")
+                
+                # [속도 조절 핵심] 스크롤 후 다음 스크롤까지의 대기 시간
+                # 0.3초(빠름) ~ 1.2초(느림) 사이로 계속 변함 -> 사람의 불규칙한 속도 모방
+                time.sleep(random.uniform(0.3, 1.2))
+                
+                # 3. 가끔(15% 확률) 위로 살짝 다시 올림 (꼼꼼히 보는 척)
+                if random.random() < 0.15:
+                    reverse = random.randint(50, 150)
+                    current_y = max(0, current_y - reverse) # 0보다 작아지지 않게
+                    self.driver.execute_script(f"window.scrollTo({{top: {current_y}, behavior: 'smooth'}});")
+                    time.sleep(random.uniform(0.5, 0.8))
+
         except: pass
-    
+
+    def _click_like_human(self, element):
+        """요소를 화면 중앙으로 부드럽게 가져온 후 클릭"""
+        try:
+            # [수정] behavior: 'smooth' 옵션 추가
+            # 발견된 상품으로 이동할 때도 '스르륵' 이동하게 만듭니다.
+            self.driver.execute_script("arguments[0].scrollIntoView({block: 'center', behavior: 'smooth'});", element)
+            
+            # 스크롤이 이동하는 시간을 벌어줌 (0.5~1.0초)
+            time.sleep(random.uniform(0.5, 1.0))
+            
+            actions = ActionChains(self.driver)
+            actions.move_to_element(element).perform()
+            
+            # 클릭 전 뜸 들이기
+            time.sleep(random.uniform(0.2, 0.5))
+            
+            actions.click(element).perform()
+        except Exception:
+            # 실패 시 안전하게 일반 클릭
+            self.driver.execute_script("arguments[0].click();", element)
+
     def visit_and_get_text(self, url):
-        """URL로 이동하여 페이지의 텍스트 정보를 긁어옵니다."""
         if not self.driver: return ""
         try:
             self.driver.get(url)
-            time.sleep(3) # 페이지 로딩 대기
-            
-            # 본문 텍스트 추출 (너무 길면 AI 토큰 낭비이므로 3000자 제한)
-            body_text = self.driver.find_element(By.TAG_NAME, "body").text
-            return body_text[:3000] 
-        except Exception as e:
-            self.log_callback(f"⚠️ [Detail] 상세 페이지 로딩 실패: {e}")
-            return ""
+            time.sleep(3)
+            return self.driver.find_element(By.TAG_NAME, "body").text[:3000]
+        except: return ""
 
     def close(self):
         try: 
