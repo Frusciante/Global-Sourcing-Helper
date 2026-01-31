@@ -63,6 +63,7 @@ class BrowserManager:
             "--no-first-run", 
             "--remote-allow-origins=*",
             "--disable-extensions",
+            "--disable-blink-features=AutomationControlled",
             # User-Agent 변경 옵션 제거 -> 원래 크롬 정보 그대로 사용
             f"--window-size={win_w},{win_h}", 
             "--lang=ko_KR" 
@@ -105,79 +106,6 @@ class BrowserManager:
         if self.driver: return self.driver.page_source
         return ""
 
-    def search_and_collect(self, url, keyword, count, is_running_check, process_callback=None):
-        """
-        [최종 통합본] 
-        - 사이트별(이베이, 라쿠텐, 타오바오 등) 전용 식별자 분리 적용
-        - 푸터(고객센터) 오클릭 및 무한 스크롤 급발진 방지 로직 포함
-        - 검색 후 로딩 대기 기능 추가
-        """
-        driver = self.driver
-        if not driver: return 0
-
-        collected_count = 0
-        page_num = 1
-        is_first_load = True 
-        processed_links = set()
-
-        # -------------------------------------------------------------
-        # 1. 사이트별 '다음 페이지' 버튼 정의
-        # -------------------------------------------------------------
-        next_btns_map = {
-            'ebay': ["//a[contains(@type, 'next')]", "//a[@aria-label='Next page']", "//a[contains(@class, 'pagination__next')]"],
-            'rakuten': ["//a[@class='nextPage']", "//div[@class='pagination']//a[contains(text(), '次の')]"],
-            'taobao': ["//button[contains(@class, 'next-next')]", "//span[contains(text(), '下一页')]"],
-            '1688': ["//a[contains(@class, 'next')]", "//a[contains(text(), '下一页')]"],
-            'common': [
-                "//a[contains(text(), 'Next')]", "//a[contains(text(), 'next')]", 
-                "//a[contains(text(), '다음')]", "//a[contains(@class, 'next')]",
-                "//li[contains(@class, 'next')]/a"
-            ]
-        }
-
-        # -------------------------------------------------------------
-        # 2. 사이트별 '상품 제목' 식별자 정의 (섞어쓰기 방지)
-        # -------------------------------------------------------------
-        product_selectors_map = {
-            'ebay': [
-                "a.s-item__link",              # [이베이 표준] 가장 정확함
-                "div.s-item__info > a"         # 백업
-            ],
-            'rakuten': [
-                "div.searchresultitem h2 a",   # [라쿠텐 표준] h2 태그 아래 링크
-                "div[data-shop-id] h2 a",      # 백업
-                "a[data-link='item']",         # 속성 기반
-                "div[class*='title-link-wrapper'] a",
-                "div[class*='title--'] a"      # 최신 라쿠텐 동적 클래스
-            ],
-            'taobao': [
-                "div[class*='title--']",       # [타오바오] 표준
-                "a[class*='doubleCardWrapper']",
-                ".ctx-box .title a"
-            ],
-            '1688': [
-                "div.title a",
-                ".offer-title a"
-            ],
-            'common': [ # 알 수 없는 사이트일 때만 사용하는 최후의 수단
-                "[class*='title--']", "[class*='Title--']", 
-                "span.a-text-normal", "div.item-name", "a[id*='item-title']", 
-                "h1", "h2", "h3"
-            ]
-        }
-
-        # -------------------------------------------------------------
-        # 3. 사이트별 '검색창' 식별자 정의
-        # -------------------------------------------------------------
-        search_selectors = [
-            "input#q", "input[name='q']", "input#mq",               # 타오바오/티몰
-            "input#commonSearchInput", "input[name='k']",           # 라쿠텐
-            "input#gh-ac",                                          # 이베이
-            "input.alisearch-input", "input#alisearch-input",       # 1688
-            "input#twotabsearchtextbox", "input[name='field-keywords']", # 아마존
-            "input#headerSearchKeyword",                            # 쿠팡
-            "input[name='keyword']", "input[type='search']", "input[id*='search']" # 공통
-        ]
 
     def search_and_collect(self, url, keyword, count, is_running_check, process_callback=None):
         """
@@ -201,6 +129,7 @@ class BrowserManager:
             'ebay': ["//a[contains(@type, 'next')]", "//a[@aria-label='Next page']", "//a[contains(@class, 'pagination__next')]"],
             'rakuten': ["//a[@class='nextPage']", "//div[@class='pagination']//a[contains(text(), '次の')]"],
             'taobao': ["//button[contains(@class, 'next-next')]", "//span[contains(text(), '下一页')]"],
+            'amazon': ["//a[contains(@class, 's-pagination-next')]", "//a[contains(text(), 'Next')]"],
             '1688': ["//a[contains(@class, 'next')]", "//a[contains(text(), '下一页')]"],
             'common': [
                 "//a[contains(text(), 'Next')]", "//a[contains(text(), 'next')]", 
@@ -240,6 +169,12 @@ class BrowserManager:
                 "div.title a",
                 ".offer-title a"
             ],
+            'amazon': [
+                "div[data-component-type='s-search-result'] h2 a", # 검색 결과 표준
+                "div.s-result-item h2 a",      # 백업
+                "h2.a-size-mini a",            # 모바일/컴팩트 뷰
+                "a.a-link-normal.s-underline-text" # 최신 텍스트 링크
+            ],           
             'common': [ 
                 "[class*='title--']", "[class*='Title--']", 
                 "span.a-text-normal", "div.item-name", "a[id*='item-title']", 
@@ -279,6 +214,7 @@ class BrowserManager:
                 elif 'rakuten' in current_url_lower: current_site_key = 'rakuten'
                 elif 'taobao' in current_url_lower or 'tmall' in current_url_lower: current_site_key = 'taobao'
                 elif '1688' in current_url_lower: current_site_key = '1688'
+                elif 'amazon' in current_url_lower: current_site_key = 'amazon'
 
                 target_selectors = product_selectors_map[current_site_key]
                 target_next_btns = next_btns_map.get(current_site_key, []) + next_btns_map['common']
