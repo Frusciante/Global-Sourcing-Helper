@@ -5,13 +5,13 @@ import requests
 import datetime
 
 class StringListEditor(ctk.CTkFrame):
-    """모던한 격자(Grid) 스타일 리스트 에디터 (전체 삭제 기능 추가됨)"""
+    """모던한 격자(Grid) 스타일 리스트 에디터 (순서 변경 및 전체 삭제 기능 포함)"""
     def __init__(self, master, title, initial_value="", height=200, **kwargs):
         super().__init__(master, **kwargs)
         self.grid_columnconfigure(0, weight=1)
         self.grid_rowconfigure(1, weight=1)
         self.items = []
-        self.title_text = title # 확인창 메시지용으로 제목 저장
+        self.title_text = title 
 
         self.configure(fg_color="transparent") 
 
@@ -27,17 +27,17 @@ class StringListEditor(ctk.CTkFrame):
         # 3. 버튼 영역 (추가 / 전체삭제)
         self.btn_frame = ctk.CTkFrame(self, fg_color="transparent")
         self.btn_frame.grid(row=2, column=0, sticky="ew", padx=5, pady=5)
-        self.btn_frame.grid_columnconfigure(0, weight=1) # 추가 버튼 비중
-        self.btn_frame.grid_columnconfigure(1, weight=0) # 삭제 버튼 비중 (고정 크기 느낌)
+        self.btn_frame.grid_columnconfigure(0, weight=1) 
+        self.btn_frame.grid_columnconfigure(1, weight=0) 
 
-        # [항목 추가 버튼] (초록색)
+        # [항목 추가 버튼]
         self.btn_add = ctk.CTkButton(self.btn_frame, text="+ 항목 추가", font=("Malgun Gothic", 14, "bold"), height=35,
                                      command=self.add_item_dialog, fg_color="#2CC985", hover_color="#229C68")
         self.btn_add.grid(row=0, column=0, sticky="ew", padx=(0, 5))
 
-        # [전체 삭제 버튼] (빨간색) - 신규 추가됨
+        # [전체 삭제 버튼]
         self.btn_clear_all = ctk.CTkButton(self.btn_frame, text="🗑️ 모두 삭제", font=("Malgun Gothic", 14, "bold"), height=35,
-                                           width=100, # 너비 고정
+                                           width=100,
                                            command=self.clear_all_items, fg_color="#FF4757", hover_color="#C0392B")
         self.btn_clear_all.grid(row=0, column=1, sticky="ew")
 
@@ -50,20 +50,50 @@ class StringListEditor(ctk.CTkFrame):
         self.render_items()
 
     def render_items(self):
+        """리스트 아이템을 UI에 그리기 (순서 변경 버튼 포함)"""
         for widget in self.scroll_frame.winfo_children():
             widget.destroy()
+            
         for idx, item_text in enumerate(self.items):
             item_card = ctk.CTkFrame(self.scroll_frame, fg_color="#333333", border_color="#555555", border_width=2, corner_radius=6)
             item_card.grid(row=idx, column=0, sticky="ew", padx=0, pady=3)
-            item_card.grid_columnconfigure(0, weight=1)
+            item_card.grid_columnconfigure(0, weight=1) # 텍스트 영역
             
-            lbl = ctk.CTkLabel(item_card, text=item_text, font=("Malgun Gothic", 15), anchor="w", wraplength=350)
+            # 1. 텍스트 라벨
+            lbl = ctk.CTkLabel(item_card, text=item_text, font=("Malgun Gothic", 15), anchor="w", wraplength=300)
             lbl.grid(row=0, column=0, sticky="w", padx=10, pady=8)
             
-            btn_del = ctk.CTkButton(item_card, text="삭제", width=50, height=28, font=("Malgun Gothic", 12),
-                                    fg_color="#FF4757", hover_color="#E04050", command=lambda i=idx: self.delete_item(i))
-            btn_del.grid(row=0, column=1, sticky="e", padx=10, pady=8)
+            # 2. 컨트롤 버튼 영역 (위, 아래, 삭제)
+            ctrl_frame = ctk.CTkFrame(item_card, fg_color="transparent")
+            ctrl_frame.grid(row=0, column=1, sticky="e", padx=5, pady=5)
+            
+            # [위로 이동] ▲
+            btn_up = ctk.CTkButton(ctrl_frame, text="▲", width=30, height=28, fg_color="#555555", hover_color="#777777",
+                                   command=lambda i=idx: self.move_item(i, -1))
+            btn_up.pack(side="left", padx=2)
+            if idx == 0: btn_up.configure(state="disabled", fg_color="#333333") # 첫 번째는 위로 못 감
+
+            # [아래로 이동] ▼
+            btn_down = ctk.CTkButton(ctrl_frame, text="▼", width=30, height=28, fg_color="#555555", hover_color="#777777",
+                                     command=lambda i=idx: self.move_item(i, 1))
+            btn_down.pack(side="left", padx=2)
+            if idx == len(self.items) - 1: btn_down.configure(state="disabled", fg_color="#333333") # 마지막은 아래로 못 감
+
+            # [삭제] X
+            btn_del = ctk.CTkButton(ctrl_frame, text="삭제", width=50, height=28, font=("Malgun Gothic", 12),
+                                    fg_color="#FF4757", hover_color="#E04050", 
+                                    command=lambda i=idx: self.delete_item(i))
+            btn_del.pack(side="left", padx=(10, 2))
     
+    def move_item(self, index, direction):
+        """항목 순서 변경 (direction: -1=위로, 1=아래로)"""
+        if direction == -1 and index > 0: # 위로
+            self.items[index], self.items[index-1] = self.items[index-1], self.items[index]
+        elif direction == 1 and index < len(self.items) - 1: # 아래로
+            self.items[index], self.items[index+1] = self.items[index+1], self.items[index]
+        
+        self.render_items() # UI 갱신
+
     def add_items(self, new_items_list):
         for item in new_items_list:
             if item not in self.items:
@@ -82,12 +112,8 @@ class StringListEditor(ctk.CTkFrame):
             del self.items[index]
             self.render_items()
 
-    # [신규 기능] 전체 삭제 (확인 메시지 포함)
     def clear_all_items(self):
-        if not self.items:
-            return # 목록이 비어있으면 아무것도 안 함
-
-        # 확인 메시지 박스 띄우기
+        if not self.items: return 
         ans = messagebox.askyesno("전체 삭제 확인", 
                                   f"[{self.title_text}]\n\n모든 항목을 삭제하시겠습니까?\n이 작업은 되돌릴 수 없습니다.")
         if ans:
