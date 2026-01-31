@@ -3,11 +3,12 @@ import pandas as pd
 import openpyxl
 
 class ExcelHandler:
-    def __init__(self, target_file, log_callback):
+    def __init__(self, target_file, log_callback, config):
         self.target_file = target_file
         self.log_callback = log_callback
         self.coupang_cat = None
         self.naver_cat = None
+        self.config = config # 설정값 저장
         
         # 초기 로드
         self.load_categories()
@@ -112,11 +113,21 @@ class ExcelHandler:
             ws.cell(row=start_row, column=6, value=data_row['url'])
             
             # 고정값들
-            ws.cell(row=start_row, column=7, value=0)
-            ws.cell(row=start_row, column=8, value='무료')
-            ws.cell(row=start_row, column=9, value=0)
-            ws.cell(row=start_row, column=10, value=5000)
-            ws.cell(row=start_row, column=11, value=10000)
+            # [수정] 설정값 불러오기 (없으면 기본값 사용)
+            try:
+                cost_basic = int(self.config.get('COST_BASIC', 0))
+                cost_exchange = int(self.config.get('COST_EXCHANGE', 5000))
+                cost_return = int(self.config.get('COST_RETURN', 10000))
+            except:
+                cost_basic, cost_exchange, cost_return = 0, 5000, 10000
+
+            # [수정] 엑셀에 설정값 적용
+            ws.cell(row=start_row, column=7, value=0) # 공급가
+            ws.cell(row=start_row, column=8, value='유료' if cost_basic > 0 else '무료')
+            ws.cell(row=start_row, column=9, value=cost_basic)    # 기본 배송비
+            ws.cell(row=start_row, column=10, value=cost_exchange) # 교환 배송비
+            ws.cell(row=start_row, column=11, value=cost_return)   # 반품 배송비
+            
             ws.cell(row=start_row, column=12, value=data_row['manufacturer'])
             ws.cell(row=start_row, column=13, value=data_row['brand'])
             ws.cell(row=start_row, column=14, value=data_row['model'])

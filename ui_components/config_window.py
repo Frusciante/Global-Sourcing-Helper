@@ -97,12 +97,11 @@ class StringListEditor(ctk.CTkFrame):
     def get_value(self):
         return ", ".join(self.items)
 
-
 class ConfigWindow(ctk.CTkToplevel):
     def __init__(self, parent, config_manager, save_callback):
         super().__init__(parent)
         self.title("설정 (Configuration)")
-        self.geometry("700x850") 
+        self.geometry("700x900") # 높이를 조금 늘렸습니다
         self.resizable(False, True)
         
         self.cm = config_manager
@@ -122,7 +121,7 @@ class ConfigWindow(ctk.CTkToplevel):
         self.btn_save.pack(side="right")
         
         # 스크롤 영역
-        self.scrollable_frame = ctk.CTkScrollableFrame(self.main_frame, width=640, height=600)
+        self.scrollable_frame = ctk.CTkScrollableFrame(self.main_frame, width=640, height=650)
         self.scrollable_frame.pack(fill="both", expand=True)
 
         # ==========================================================
@@ -175,9 +174,31 @@ class ConfigWindow(ctk.CTkToplevel):
         self.url_editor = StringListEditor(self.sec_url, title="쇼핑몰 URL 목록", initial_value=self.cm.get_val("SHOP_URLS"), height=150)
         self.url_editor.pack(fill="x", pady=10)
 
+        # ==========================================================
+        # 4. [신규 섹션] 배송비 설정 (이미지 요청 반영)
+        # ==========================================================
+        self.sec_shipping = self._create_section_frame(self.scrollable_frame, "🚚 배송비 설정", color="#2E3033")
+        
+        # 그리드 레이아웃을 사용하여 테이블 형태로 배치
+        self.shipping_grid = ctk.CTkFrame(self.sec_shipping, fg_color="transparent")
+        self.shipping_grid.pack(fill="x", pady=10)
+        self.shipping_grid.grid_columnconfigure((0, 1, 2, 3), weight=1)
+
+        # 4-1. 기본 배송비
+        self._create_shipping_input(self.shipping_grid, 0, "기본 배송비", "COST_BASIC", "0")
+        
+        # 4-2. 교환 배송비
+        self._create_shipping_input(self.shipping_grid, 1, "교환 배송비", "COST_EXCHANGE", "20000")
+        
+        # 4-3. 반품 배송비
+        self._create_shipping_input(self.shipping_grid, 2, "반품 배송비", "COST_RETURN", "20000")
+
+        # 4-4. [추가됨] 배송대행지 비용
+        self._create_shipping_input(self.shipping_grid, 3, "배송대행지 비용", "COST_AGENCY", "0")
+
 
         # ==========================================================
-        # 4. [섹션] 일반 설정
+        # 5. [섹션] 일반 설정
         # ==========================================================
         self.sec_general = self._create_section_frame(self.scrollable_frame, "🛠️ 일반 설정", color="#2E3033")
 
@@ -206,10 +227,23 @@ class ConfigWindow(ctk.CTkToplevel):
         label = ctk.CTkLabel(parent, text=text, font=("Malgun Gothic", 14, "bold"), text_color="#AAAAAA")
         label.pack(anchor="w", pady=(5, 0))
 
-    def _create_input_field(self, parent, placeholder, initial_value):
-        entry = ctk.CTkEntry(parent, placeholder_text=placeholder, height=35, font=("Malgun Gothic", 12))
-        if initial_value: entry.insert(0, initial_value)
-        return entry
+    # [신규] 배송비 입력 필드 생성 헬퍼
+    def _create_shipping_input(self, parent, col_idx, title, config_key, default_val):
+        frame = ctk.CTkFrame(parent, fg_color="#3A3A3A", corner_radius=6)
+        frame.grid(row=0, column=col_idx, sticky="ew", padx=5)
+        
+        lbl = ctk.CTkLabel(frame, text=title, font=("Malgun Gothic", 14, "bold"), text_color="#FFD700") # 노란색 포인트
+        lbl.pack(pady=(10, 5))
+        
+        entry = ctk.CTkEntry(frame, font=("Malgun Gothic", 14), justify="center")
+        entry.pack(pady=(0, 10), padx=10)
+        
+        val = self.cm.get_val(config_key)
+        if not val: val = default_val # 값이 없으면 기본값 사용
+        entry.insert(0, val)
+        
+        # 나중에 저장할 때 참조하기 위해 인스턴스 변수로 저장 (예: self.entry_COST_BASIC)
+        setattr(self, f"entry_{config_key}", entry)
 
     # --- Actions ---
     def run_naver_recommendation(self):
@@ -282,6 +316,12 @@ class ConfigWindow(ctk.CTkToplevel):
         item_count = self.entry_count.get().strip()
         excel_file = self.entry_excel.get().strip()
         
+        # [신규] 배송비 값 가져오기
+        cost_basic = getattr(self, "entry_COST_BASIC").get().strip()
+        cost_exchange = getattr(self, "entry_COST_EXCHANGE").get().strip()
+        cost_return = getattr(self, "entry_COST_RETURN").get().strip()
+        cost_agency = getattr(self, "entry_COST_AGENCY").get().strip() # [추가]
+
         if not gemini_keys:
             messagebox.showwarning("경고", "Gemini API Key는 필수입니다.")
             return
@@ -292,7 +332,12 @@ class ConfigWindow(ctk.CTkToplevel):
             "TARGET_ITEMS": target_items,
             "SHOP_URLS": shop_urls,
             "ITEM_COUNT": item_count,
-            "EXCEL_FILE": excel_file
+            "EXCEL_FILE": excel_file,
+            # [신규] 배송비 설정 저장
+            "COST_BASIC": cost_basic,
+            "COST_EXCHANGE": cost_exchange,
+            "COST_RETURN": cost_return,
+            "COST_AGENCY": cost_agency # [추가]
         }
         
         self.cm.update_config(new_config)

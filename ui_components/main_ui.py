@@ -114,7 +114,7 @@ class MainUI(ctk.CTk):
         self.btn_setting.configure(state="disabled")
         
         self.log("\n🚀 작업을 시작합니다...")
-        config_data = self.cm.config['SETTINGS'] if 'SETTINGS' in self.cm.config else {}
+        config_data = self.cm.config
         self.processor = SourcingProcessor(config_data, self.log)
         
         self.thread = threading.Thread(target=self.run_thread)

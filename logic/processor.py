@@ -21,7 +21,7 @@ class SourcingProcessor:
         
         # 1. 엑셀 핸들러
         excel_file = self.config.get('EXCEL_FILE', 'windly-excel-bulk-upload-ver9.xlsx')
-        self.excel = ExcelHandler(excel_file, log_callback)
+        self.excel = ExcelHandler(excel_file, log_callback, config)
         
         # 2. 브라우저 매니저
         self.browser = BrowserManager(log_callback)
