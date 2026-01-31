@@ -289,6 +289,11 @@ class BrowserManager:
                             for btn in btns:
                                 if btn.is_displayed():
                                     if btn.get_attribute("disabled") or "disabled" in btn.get_attribute("class"): continue
+                                    try:
+                                        if btn.location['y'] < 2000: 
+                                            # self.log_callback("   🛡️ 상단 버튼 감지됨(오탐지 방지). 무시합니다.")
+                                            continue
+                                    except: pass
                                     found_next_btn = btn
                                     break
                             if found_next_btn: break
